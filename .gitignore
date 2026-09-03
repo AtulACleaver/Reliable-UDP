@@ -1,8 +1,0 @@
-venv/
-__pycache__/
-.pytest_cache/
-.idea/
-.vscode/
-.DS_Store
-results/*.csv
-results/*.png

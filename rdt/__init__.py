@@ -1,3 +1,0 @@
-"""
-RDT implementation over UDP.
-"""
