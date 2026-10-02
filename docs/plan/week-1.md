@@ -1,4 +1,4 @@
 # Week 1 Plan
 
-> Export from Notion. Replace this file with the actual week-1 plan before
-> opening Issues.
+- Lane 2 (Shashank): [docs/plan/week-1-shashank.md](file:///c:/Users/KIIT/OneDrive/Desktop/Reliable-UDP/docs/plan/week-1-shashank.md)
+
