@@ -40,8 +40,7 @@ class SendWindow:
         Returns:
             bool: True if nextseq - base < window, False otherwise.
         """
-        # TODO(Shashank): Write arithmetic by hand for viva
-        raise NotImplementedError("Shashank implements this by hand")
+        return (self.nextseq - self.base) < self.window
 
     def next_seq(self) -> int:
         """
@@ -53,8 +52,13 @@ class SendWindow:
         Raises:
             RuntimeError: If the window is currently full.
         """
-        # TODO(Shashank): Write arithmetic by hand for viva
-        raise NotImplementedError("Shashank implements this by hand")
+        if not self.can_send():
+            raise RuntimeError(
+                f"Window full: in flight {self.nextseq - self.base} >= {self.window}"
+            )
+        seq = self.nextseq
+        self.nextseq += 1
+        return seq
 
     def on_ack(self, ack: int) -> int:
         """
@@ -75,8 +79,12 @@ class SendWindow:
         Returns:
             int: The number of sequence slots the window advanced (>= 0).
         """
-        # TODO(Shashank): Write arithmetic by hand for viva
-        raise NotImplementedError("Shashank implements this by hand")
+        if ack < self.base or ack >= self.nextseq:
+            return 0
+
+        moved = (ack + 1) - self.base
+        self.base = ack + 1
+        return moved
 
     def outstanding(self) -> list[int]:
         """
@@ -84,10 +92,9 @@ class SendWindow:
         This is the exact list of packets that a GBN timeout resends.
 
         Returns:
-            List[int]: Sequence numbers sent but not yet acknowledged.
+            list[int]: Sequence numbers sent but not yet acknowledged.
         """
-        # TODO(Shashank): Write arithmetic by hand for viva
-        raise NotImplementedError("Shashank implements this by hand")
+        return list(range(self.base, self.nextseq))
 
     def is_empty(self) -> bool:
         """
@@ -96,5 +103,5 @@ class SendWindow:
         Returns:
             bool: True if base == nextseq, False if there are packets in flight.
         """
-        # TODO(Shashank): Write arithmetic by hand for viva
-        raise NotImplementedError("Shashank implements this by hand")
+        return self.base == self.nextseq
+
