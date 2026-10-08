@@ -37,9 +37,9 @@ On Windows use `py` instead of `python`.
 
 ```
  sender (send_file)        channel.py                  receiver (recv_file)
-       |  DATA  -------->  damage(): loss, corrupt,  -------->  |
+       |  DATA  -------->  damage(): loss, corrupt,  ---------> |
        |                   dup, delay+jitter, reorder           |
-       |  <--------  ACK   (same, decided separately)  <-------- |
+       |  <--------  ACK   (same, decided separately)  <------- |
 ```
 
 `transfer.py` starts all three on this machine, runs the protocol you pick
