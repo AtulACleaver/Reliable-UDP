@@ -15,6 +15,8 @@ import time
 import traceback
 import packet
 import stopwait
+import rto
+from rto import FixedRTO
 
 
 # --- RTO and Channel test helpers ---
@@ -304,6 +306,18 @@ def test_sw_empty_file_transfer():
     assert res["sent"] == 1
     assert res["retx"] == 0
     assert res["sha256_ok"] is True
+
+
+# --- Archit: rto.py & channel.py ---
+def test_rto_fixed():
+    rto_inst = FixedRTO(0.2)
+    assert abs(rto_inst.value() - 0.2) < 1e-6
+    rto_inst.sample(0.05, False)
+    assert abs(rto_inst.value() - 0.2) < 1e-6
+    rto_inst.backoff()
+    assert abs(rto_inst.value() - 0.4) < 1e-6
+    rto_inst.forward()
+    assert abs(rto_inst.value() - 0.2) < 1e-6
 
 
 def main():
