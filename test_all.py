@@ -18,6 +18,7 @@ import stopwait
 import gbn
 import channel
 import rto
+import sr
 from channel import Channel, damage
 from rto import FixedRTO, AdaptiveRTO
 
@@ -819,6 +820,109 @@ def test_gbn_cumulative_ack_slides_multiple():
     assert stats["sent"] == 3
     assert stats["retx"] == 0
     assert stats["timeouts"] == 0
+
+
+# --- Aqifa: sr.py ---
+def test_sr_timer_heap_ordering():
+    """Verify TimerHeap pops earlier deadlines first regardless of insertion order."""
+    class FakeClock:
+        def __init__(self):
+            self.t = 100.0
+
+        def __call__(self):
+            return self.t
+
+    clk = FakeClock()
+    heap = sr.TimerHeap(clock=clk)
+    heap.schedule(seq=2, rto=1.0)  # deadline 101.0
+    heap.schedule(seq=1, rto=0.5)  # deadline 100.5
+    heap.schedule(seq=3, rto=2.0)  # deadline 102.0
+
+    assert heap.next_deadline() == 100.5
+    assert heap.time_to_next_deadline() == 0.5
+
+    clk.t = 100.8
+    expired = heap.pop_expired()
+    assert expired == [1]
+
+    clk.t = 102.5
+    expired = heap.pop_expired()
+    assert expired == [2, 3]
+
+
+def test_sr_timer_heap_cancellation():
+    """Verify cancelling a timer via lazy deletion prevents it from expiring."""
+    class FakeClock:
+        def __init__(self):
+            self.t = 10.0
+
+        def __call__(self):
+            return self.t
+
+    clk = FakeClock()
+    heap = sr.TimerHeap(clock=clk)
+    heap.schedule(seq=10, rto=1.0)
+    heap.schedule(seq=11, rto=2.0)
+
+    # Cancel seq 10 before it expires
+    heap.cancel(10)
+    assert not heap.is_active(10)
+    assert heap.is_active(11)
+    # The next active deadline should skip 10 and return 11's deadline
+    assert heap.next_deadline() == 12.0
+
+    clk.t = 15.0
+    expired = heap.pop_expired()
+    assert expired == [11]
+
+
+def test_sr_timer_heap_reschedule_epoch():
+    """Verify epoch protection: rescheduling ignores stale earlier deadline."""
+    class FakeClock:
+        def __init__(self):
+            self.t = 50.0
+
+        def __call__(self):
+            return self.t
+
+    clk = FakeClock()
+    heap = sr.TimerHeap(clock=clk)
+    # Schedule seq 5 with short rto
+    heap.schedule(seq=5, rto=1.0)  # deadline 51.0 (epoch 1)
+    # Reschedule seq 5 with longer rto
+    clk.t = 50.5
+    heap.schedule(seq=5, rto=2.0)  # deadline 52.5 (epoch 2)
+
+    # Advance clock past old deadline (51.0) but before new deadline (52.5)
+    clk.t = 51.5
+    expired = heap.pop_expired()
+    assert expired == []  # Old epoch must NOT fire
+
+    # Advance clock past new deadline
+    clk.t = 53.0
+    expired = heap.pop_expired()
+    assert expired == [5]
+
+
+def test_sr_timer_heap_pop_multiple():
+    """Verify multiple timers expiring at the same time are all returned."""
+    class FakeClock:
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    clk = FakeClock()
+    heap = sr.TimerHeap(clock=clk)
+    heap.schedule(seq=1, rto=1.0)
+    heap.schedule(seq=2, rto=1.0)
+    heap.schedule(seq=3, rto=1.5)
+
+    clk.t = 1.0
+    expired = heap.pop_expired()
+    assert sorted(expired) == [1, 2]
+    assert heap.next_deadline() == 1.5
 
 
 def main():
