@@ -18,6 +18,7 @@ import stopwait
 import gbn
 import channel
 import rto
+import experiments
 from channel import Channel, damage
 from rto import FixedRTO, AdaptiveRTO
 
@@ -819,6 +820,92 @@ def test_gbn_cumulative_ack_slides_multiple():
     assert stats["sent"] == 3
     assert stats["retx"] == 0
     assert stats["timeouts"] == 0
+
+
+# --- Harsha: experiments.py & plots.py ---
+def test_experiments_configs_shape_and_types():
+    """Verify configs returns 46 parameter dictionaries with exact required keys and types."""
+    rows = experiments.configs()
+    assert isinstance(rows, list)
+    assert len(rows) == 46
+    keys = {"sweep", "protocol", "window", "rto", "loss", "reorder"}
+    for row in rows:
+        assert set(row) == keys
+        assert isinstance(row["window"], int)
+        assert isinstance(row["loss"], float)
+        assert isinstance(row["reorder"], float)
+        for k in ("sweep", "protocol", "rto"):
+            assert isinstance(row[k], str)
+
+
+def test_experiments_configs_counts():
+    """Verify exact count of configurations allocated to each experiment sweep."""
+    rows = experiments.configs()
+    counts = {}
+    for r in rows:
+        counts[r["sweep"]] = counts.get(r["sweep"], 0) + 1
+    assert counts == {"loss": 18, "window": 12, "reorder": 10, "rto": 6}
+
+
+def test_experiments_configs_loss_grid():
+    """Verify loss sweep tests sw, gbn, sr across all 6 loss rates with controls."""
+    rows = [r for r in experiments.configs() if r["sweep"] == "loss"]
+    expected_protocols = {"sw", "gbn", "sr"}
+    expected_losses = {0.0, 0.01, 0.02, 0.05, 0.1, 0.2}
+    combos = {(r["protocol"], r["loss"]) for r in rows}
+    assert len(combos) == 18
+    assert {p for p, _ in combos} == expected_protocols
+    assert {l for _, l in combos} == expected_losses
+    for r in rows:
+        assert r["window"] == (1 if r["protocol"] == "sw" else 32)
+        assert r["rto"] == "adaptive"
+        assert r["reorder"] == 0.0
+
+
+def test_experiments_configs_window_grid():
+    """Verify window sweep tests gbn and sr across 6 window sizes with controls."""
+    rows = [r for r in experiments.configs() if r["sweep"] == "window"]
+    combos = {(r["protocol"], r["window"]) for r in rows}
+    assert len(combos) == 12
+    assert {p for p, _ in combos} == {"gbn", "sr"}
+    assert {w for _, w in combos} == {1, 4, 16, 32, 64, 128}
+    for r in rows:
+        assert r["loss"] == 0.05
+        assert r["rto"] == "adaptive"
+        assert r["reorder"] == 0.0
+
+
+def test_experiments_configs_reorder_and_rto_grids():
+    """Verify reorder and RTO parameter sweeps contain expected settings and controls."""
+    reorder_rows = [r for r in experiments.configs() if r["sweep"] == "reorder"]
+    assert len(reorder_rows) == 10
+    reorder_combos = {(r["protocol"], r["reorder"]) for r in reorder_rows}
+    assert {p for p, _ in reorder_combos} == {"gbn", "sr"}
+    assert {ro for _, ro in reorder_combos} == {0.0, 0.01, 0.05, 0.1, 0.2}
+    for r in reorder_rows:
+        assert r["window"] == 32
+        assert r["rto"] == "adaptive"
+        assert r["loss"] == 0.0
+
+    rto_rows = [r for r in experiments.configs() if r["sweep"] == "rto"]
+    assert len(rto_rows) == 6
+    rto_combos = {(r["protocol"], r["rto"]) for r in rto_rows}
+    assert {p for p, _ in rto_combos} == {"gbn", "sr"}
+    assert {policy for _, policy in rto_combos} == {"fixed:0.5", "adaptive", "adaptive-nokarn"}
+    for r in rto_rows:
+        assert r["window"] == 32
+        assert r["loss"] == 0.05
+        assert r["reorder"] == 0.0
+
+
+def test_experiments_configs_uniqueness_and_stability():
+    """Verify all 46 configuration dicts are unique, non-aliased, and call-stable."""
+    rows1 = experiments.configs()
+    rows2 = experiments.configs()
+    assert rows1 == rows2
+    assert len({tuple(sorted(r.items())) for r in rows1}) == 46
+    rows1[0]["loss"] = 0.99
+    assert experiments.configs()[0]["loss"] == 0.0
 
 
 def main():
