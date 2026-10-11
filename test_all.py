@@ -15,7 +15,9 @@ import time
 import traceback
 import packet
 import stopwait
+import channel
 import rto
+from channel import Channel, damage
 from rto import FixedRTO
 
 
@@ -318,6 +320,34 @@ def test_rto_fixed():
     assert abs(rto_inst.value() - 0.4) < 1e-6
     rto_inst.forward()
     assert abs(rto_inst.value() - 0.2) < 1e-6
+
+
+def test_channel_damage():
+    ch = Channel(loss=1.0, seed=42)
+    assert ch.damage(b"hello") == []
+
+    ch_clean = Channel(loss=0.0, corrupt=0.0, dup=0.0, delay=0.0, seed=42)
+    assert ch_clean.damage(b"hello") == [b"hello"]
+
+    ch_dup = Channel(dup=1.0, seed=42)
+    assert ch_dup.damage(b"hello") == [b"hello", b"hello"]
+
+    ch_corrupt = Channel(corrupt=1.0, seed=42)
+    damaged = ch_corrupt.damage(b"hello")
+    assert len(damaged) == 1
+    assert damaged[0] != b"hello"
+    assert len(damaged[0]) == len(b"hello")
+
+
+def test_channel_corrupt_packet_checksum_failure():
+    # Bit-corrupted packets produced by Channel.damage must fail packet.parse_packet checksum
+    orig_pkt = packet.make_data(0, b"critical data chunk", True)
+    assert packet.parse_packet(orig_pkt) is not None
+
+    ch = Channel(corrupt=1.0, seed=42)
+    damaged = ch.damage(orig_pkt)
+    assert len(damaged) == 1
+    assert packet.parse_packet(damaged[0]) is None
 
 
 def main():
