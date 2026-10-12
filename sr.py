@@ -82,3 +82,62 @@ class TimerHeap:
                 del self.live[seq]
                 expired.append(seq)
         return expired
+
+
+def recv_file(sock: socket.socket, window: int) -> bytes:
+    """
+    Receive a file using Selective Repeat ARQ.
+
+    Maintains a receive buffer of capacity `window`.
+    - If arriving packet seq in [recv_base .. recv_base + window - 1]:
+      Send individual ACK for seq, buffer payload.
+      If seq == recv_base: advance recv_base and flush contiguous buffered packets.
+    - If arriving packet seq in [recv_base - window .. recv_base - 1] (or seq < recv_base):
+      Re-ACK seq so sender knows it arrived even if earlier ACK was lost.
+    - Otherwise: ignore out-of-window packet.
+
+    Args:
+        sock: Bound UDP socket to receive from.
+        window: Receive window capacity.
+
+    Returns:
+        bytes: Complete reassembled file payload.
+    """
+    window = max(window, 1)
+    recv_base = 0
+    buffered: dict[int, bytes] = {}
+    fin_seq: int | None = None
+    fin_seen = False
+    chunks: list[bytes] = []
+
+    while True:
+        timeout = LINGER if fin_seen else IDLE
+        pkt, addr = receive(sock, timeout)
+
+        if pkt is None:
+            break
+
+        if not (pkt["flags"] & DATA):
+            continue
+
+        seq = pkt["seq"]
+
+        if pkt["flags"] & FIN:
+            fin_seq = seq
+
+        if recv_base <= seq < recv_base + window:
+            sock.sendto(make_ack(seq), addr)
+            buffered[seq] = pkt["payload"]
+
+            if seq == recv_base:
+                while recv_base in buffered:
+                    payload = buffered.pop(recv_base)
+                    chunks.append(payload)
+                    if fin_seq is not None and recv_base == fin_seq:
+                        fin_seen = True
+                    recv_base += 1
+
+        elif seq < recv_base:
+            sock.sendto(make_ack(seq), addr)
+
+    return b"".join(chunks)
