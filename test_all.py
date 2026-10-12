@@ -925,6 +925,51 @@ def test_sr_timer_heap_pop_multiple():
     assert heap.next_deadline() == 1.5
 
 
+def test_sr_receiver_buffers_out_of_order_and_flushes():
+    """SR receiver must buffer out-of-order packets inside window and flush when base arrives."""
+    orig_linger = sr.LINGER
+    sr.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_port = recv_sock.getsockname()[1]
+        received = []
+
+        t = threading.Thread(target=lambda: received.append(sr.recv_file(recv_sock, 4)))
+        t.start()
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(0.5)
+
+        # Send packet 1 FIRST (out-of-order! packet 0 not sent yet)
+        client.sendto(packet.make_data(1, b"chunk1", False), ("127.0.0.1", r_port))
+        ack1_raw, _ = client.recvfrom(1024)
+        ack1 = packet.parse_packet(ack1_raw)
+        # In SR, receiver sends ACK 1 immediately, even though packet 0 is missing!
+        assert ack1 is not None and ack1["ack"] == 1
+
+        # Send packet 2 (also out of order)
+        client.sendto(packet.make_data(2, b"chunk2", True), ("127.0.0.1", r_port))
+        ack2_raw, _ = client.recvfrom(1024)
+        ack2 = packet.parse_packet(ack2_raw)
+        assert ack2 is not None and ack2["ack"] == 2
+
+        # Now send missing packet 0! Receiver should deliver 0, 1, 2 in order
+        client.sendto(packet.make_data(0, b"chunk0", False), ("127.0.0.1", r_port))
+        ack0_raw, _ = client.recvfrom(1024)
+        ack0 = packet.parse_packet(ack0_raw)
+        assert ack0 is not None and ack0["ack"] == 0
+
+        t.join(timeout=1.0)
+        recv_sock.close()
+        client.close()
+
+        assert len(received) == 1
+        assert received[0] == b"chunk0chunk1chunk2"
+    finally:
+        sr.LINGER = orig_linger
+
+
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
 
