@@ -64,3 +64,42 @@ class TimerHeap:
                 del self.live[seq]
                 expired.append(seq)
         return expired
+
+
+def recv_file(sock: socket.socket, window: int) -> bytes:
+    """Receive a file using Selective Repeat ARQ with out-of-order buffering."""
+    window = max(window, 1)
+    recv_base = 0
+    buffered: dict[int, bytes] = {}
+    fin_seq: int | None = None
+    fin_seen = False
+    chunks: list[bytes] = []
+
+    while True:
+        timeout = LINGER if fin_seen else IDLE
+        pkt, addr = receive(sock, timeout)
+        if pkt is None:
+            break
+
+        if not (pkt["flags"] & DATA):
+            continue
+
+        seq = pkt["seq"]
+        if pkt["flags"] & FIN:
+            fin_seq = seq
+
+        if recv_base <= seq < recv_base + window:
+            sock.sendto(make_ack(seq), addr)
+            buffered[seq] = pkt["payload"]
+
+            while recv_base in buffered:
+                chunks.append(buffered.pop(recv_base))
+                if fin_seq is not None and recv_base == fin_seq:
+                    fin_seen = True
+                recv_base += 1
+
+        elif seq < recv_base:
+            # Re-ACK delivered packet if earlier ACK was dropped
+            sock.sendto(make_ack(seq), addr)
+
+    return b"".join(chunks)
