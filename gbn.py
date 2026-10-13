@@ -58,4 +58,29 @@ def send_file(
     rto: "FixedRTO | AdaptiveRTO",
 ) -> dict:
     """Transmit data using Go-Back-N pipelined ARQ."""
-    raise NotImplementedError("Sender implementation in progress")
+    window = max(window, 1)
+
+    chunks = split_file(data)
+    total = len(chunks)
+    packets = [make_data(i, chunks[i], i == total - 1) for i in range(total)]
+
+    stats = {
+        "packets": total,
+        "sent": 0,
+        "retx": 0,
+        "timeouts": 0,
+        "dup_acks": 0,
+        "seconds": 0.0,
+    }
+
+    base = 0
+    nextseq = 0
+    start_time = time.monotonic()
+
+    while nextseq < base + window and nextseq < total:
+        sock.sendto(packets[nextseq], peer)
+        stats["sent"] += 1
+        nextseq += 1
+
+    stats["seconds"] = time.monotonic() - start_time
+    return stats
