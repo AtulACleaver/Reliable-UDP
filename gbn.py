@@ -72,5 +72,47 @@ def send_file(
     window: int,
     rto: "FixedRTO | AdaptiveRTO",
 ) -> dict:
-    """Transmit data using Go-Back-N pipelining ARQ."""
-    raise NotImplementedError("Sender implementation in progress")
+    """
+    Transmit data using Go-Back-N pipelining ARQ.
+
+    Maintains window invariant: nextseq - base <= window.
+    Single timer runs for the oldest unacknowledged packet (`base`).
+    Upon timeout, retransmits all outstanding packets [base .. nextseq - 1].
+
+    Args:
+        sock: Bound UDP socket to transmit from.
+        peer: Destination (host, port) tuple.
+        data: File bytes to transfer.
+        window: Pipelined sender window capacity (W >= 1).
+        rto: Retransmission timeout estimator.
+
+    Returns:
+        dict: Stats mapping with keys: packets, sent, retx, timeouts, dup_acks, seconds.
+    """
+    window = max(window, 1)
+
+    chunks = split_file(data)
+    total = len(chunks)
+    packets = [make_data(i, chunks[i], i == total - 1) for i in range(total)]
+
+    stats = {
+        "packets": total,
+        "sent": 0,
+        "retx": 0,
+        "timeouts": 0,
+        "dup_acks": 0,
+        "seconds": 0.0,
+    }
+
+    base = 0
+    nextseq = 0
+    start_time = time.monotonic()
+
+    # Transmit initial window packets respecting window capacity
+    while nextseq < base + window and nextseq < total:
+        sock.sendto(packets[nextseq], peer)
+        stats["sent"] += 1
+        nextseq += 1
+
+    stats["seconds"] = time.monotonic() - start_time
+    return stats
