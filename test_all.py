@@ -18,7 +18,7 @@ import stopwait
 import channel
 import rto
 from channel import Channel, damage
-from rto import FixedRTO
+from rto import FixedRTO, AdaptiveRTO
 
 
 # --- RTO and Channel test helpers ---
@@ -320,6 +320,103 @@ def test_rto_fixed():
     assert abs(rto_inst.value() - 0.4) < 1e-6
     rto_inst.forward()
     assert abs(rto_inst.value() - 0.2) < 1e-6
+
+
+def test_rto_adaptive():
+    rto_inst = AdaptiveRTO(initial=0.2, min_rto=0.05, max_rto=10.0)
+    assert abs(rto_inst.value() - 0.2) < 1e-6
+
+    rto_inst.sample(0.1, False)
+    assert rto_inst.srtt == 0.1
+    assert rto_inst.rttvar == 0.05
+    assert abs(rto_inst.value() - 0.3) < 1e-6
+
+    rto_inst.sample(0.2, True)
+    assert rto_inst.srtt == 0.1
+
+    rto_inst.backoff()
+    assert abs(rto_inst.value() - 0.6) < 1e-6
+
+    rto_inst.forward()
+    assert abs(rto_inst.value() - 0.3) < 1e-6
+
+
+def test_rto_adaptive_first_sample():
+    # RFC 6298 Section 2.2: SRTT <- R, RTTVAR <- R/2, RTO <- SRTT + 4 * RTTVAR = 3 * R
+    rto = AdaptiveRTO(initial=1.0, min_rto=0.01, max_rto=10.0)
+    rto.sample(0.08, False)
+    assert abs(rto.srtt - 0.08) < 1e-6
+    assert abs(rto.rttvar - 0.04) < 1e-6
+    assert abs(rto.value() - 0.24) < 1e-6
+
+
+def test_rto_adaptive_clamping():
+    # Clamping against min_rto and max_rto
+    rto = AdaptiveRTO(initial=0.2, min_rto=0.05, max_rto=2.0)
+    rto.sample(0.001, False)
+    assert rto.value() >= 0.05
+    for _ in range(10):
+        rto.backoff()
+    assert rto.value() <= 2.0
+
+
+def test_rto_adaptive_backoff_and_forward():
+    rto = AdaptiveRTO(initial=0.2, min_rto=0.05, max_rto=5.0)
+    rto.sample(0.1, False)
+    assert abs(rto.value() - 0.3) < 1e-6
+    rto.backoff()
+    assert abs(rto.value() - 0.6) < 1e-6
+    rto.backoff()
+    assert abs(rto.value() - 1.2) < 1e-6
+    rto.forward()
+    assert abs(rto.value() - 0.3) < 1e-6
+
+
+def test_rto_adaptive_variance_tracking():
+    # Steady samples reduce variance; a spike immediately increases RTTVAR
+    rto = AdaptiveRTO(initial=0.2, min_rto=0.01, max_rto=10.0)
+    for _ in range(8):
+        rto.sample(0.1, False)
+    steady_var = rto.rttvar
+
+    rto.sample(0.3, False)
+    assert rto.rttvar > steady_var
+
+
+def test_rto_karn_toggle():
+    rto_inst = AdaptiveRTO(initial=0.2, karn=False)
+    rto_inst.sample(0.1, False)
+    assert rto_inst.srtt == 0.1
+    rto_inst.sample(0.2, True)
+    assert rto_inst.srtt != 0.1
+    assert len(rto_inst.trace) == 2
+
+
+def test_rto_karn_retransmission_ignored():
+    # When karn=True (default), samples for resent packets are discarded
+    rto = AdaptiveRTO(initial=0.2, karn=True)
+    rto.sample(0.1, False)
+    srtt_before = rto.srtt
+    rttvar_before = rto.rttvar
+    rto_val_before = rto.value()
+
+    rto.sample(0.5, True)  # resent=True should be ignored
+    assert rto.srtt == srtt_before
+    assert rto.rttvar == rttvar_before
+    assert rto.value() == rto_val_before
+    assert len(rto.trace) == 1
+
+
+def test_rto_trace_logging():
+    # Verify trace entries have complete metrics for plotting and analysis
+    rto = AdaptiveRTO(initial=0.2)
+    rto.sample(0.08, False)
+    assert len(rto.trace) == 1
+    entry = rto.trace[0]
+    for key in ["rtt", "srtt", "rttvar", "rto", "resent"]:
+        assert key in entry
+    assert entry["resent"] is False
+    assert abs(entry["rtt"] - 0.08) < 1e-6
 
 
 def test_channel_damage():
