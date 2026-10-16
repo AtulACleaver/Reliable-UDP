@@ -3,9 +3,17 @@
 The sender and receiver never talk directly. Every packet goes through the
 channel, which decides what happens to it: dropped, corrupted, duplicated,
 delayed, or held back so later packets overtake it.
+
+Why userspace instead of Linux tc netem?
+Linux tc netem requires root/kernel privileges and is platform-specific.
+Building an impairment emulator in userspace using Blake2b cryptographic hashes
+guarantees cross-platform portability (Windows/macOS/Linux) and deterministic
+repeatability across multi-protocol evaluations.
 """
 
+import hashlib
 import random
+import struct
 
 
 class Channel:
@@ -19,22 +27,47 @@ class Channel:
         self.rate = rate
         self.seed = seed
         self.rng = random.Random(seed)
+        self.attempts = {}
+
+    def _decide(self, salt, seq, attempt, p):
+        """Hash-seeded impairment decision function.
+
+        Derives impairment decisions from a cryptographic hash of packet identity:
+            key = f"{seed}|{salt}|{seq}|{attempt}"
+            hash = blake2b(key, 8 bytes)
+            probability = int(hash) / 2**64 < p
+
+        Eliminates stream-position dependency so Stop-and-Wait, Go-Back-N, and
+        Selective Repeat encounter identical loss/damage patterns under the same seed.
+        """
+        if self.seed is None:
+            return self.rng.random() < p
+        key = f"{self.seed}|{salt}|{seq}|{attempt}".encode()
+        h = hashlib.blake2b(key, digest_size=8).digest()
+        val = int.from_bytes(h, "big") / (2**64)
+        return val < p
 
     def damage(self, raw: bytes, direction: str = "to_receiver"):
         data = raw
         if not data:
             return []
 
-        if self.loss > 0 and self.rng.random() < self.loss:
+        seq = 0
+        if len(data) >= 4:
+            seq = struct.unpack("!I", data[:4])[0]
+        attempt = self.attempts.get(seq, 0) + 1
+        self.attempts[seq] = attempt
+
+        if self.loss > 0 and self._decide("loss", seq, attempt, self.loss):
             return []
 
         pkt = bytearray(data)
-        if self.corrupt > 0 and len(pkt) > 0 and self.rng.random() < self.corrupt:
+        if self.corrupt > 0 and len(pkt) > 0 and self._decide("corrupt", seq, attempt, self.corrupt):
             idx = self.rng.randint(0, len(pkt) - 1)
             pkt[idx] ^= 0xFF
 
         res = [bytes(pkt)]
-        if self.dup > 0 and self.rng.random() < self.dup:
+        if self.dup > 0 and self._decide("dup", seq, attempt, self.dup):
             res.append(bytes(pkt))
 
         return res

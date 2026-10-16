@@ -436,6 +436,43 @@ def test_channel_damage():
     assert len(damaged[0]) == len(b"hello")
 
 
+def test_channel_determinism():
+    ch1 = Channel(loss=0.5, corrupt=0.2, seed=12345)
+    ch2 = Channel(loss=0.5, corrupt=0.2, seed=12345)
+    p1 = [ch1.damage(b"\x00\x00\x00\x01data") for _ in range(10)]
+    p2 = [ch2.damage(b"\x00\x00\x00\x01data") for _ in range(10)]
+    assert p1 == p2
+
+
+def test_channel_determinism_seed_divergence():
+    # Different seeds must produce different impairment outcomes
+    ch1 = Channel(loss=0.5, corrupt=0.2, seed=11111)
+    ch2 = Channel(loss=0.5, corrupt=0.2, seed=99999)
+    p1 = [ch1.damage(b"\x00\x00\x00\x01data") for _ in range(20)]
+    p2 = [ch2.damage(b"\x00\x00\x00\x01data") for _ in range(20)]
+    assert p1 != p2
+
+
+def test_channel_attempt_tracking():
+    # Retransmissions of the same seq advance the attempt counter
+    ch = Channel(loss=0.0, corrupt=0.0, seed=42)
+    pkt = b"\x00\x00\x00\x07payload"
+    ch.damage(pkt)
+    assert ch.attempts.get(7) == 1
+    ch.damage(pkt)
+    assert ch.attempts.get(7) == 2
+
+
+def test_channel_determinism_drill():
+    # Determinism drill: Two independent channel instances with identical seed yield exact decisions
+    ch1 = Channel(loss=0.25, corrupt=0.1, dup=0.1, reorder=0.1, seed=98765)
+    ch2 = Channel(loss=0.25, corrupt=0.1, dup=0.1, reorder=0.1, seed=98765)
+
+    stream1 = [ch1.damage(f"packet_{i}".encode()) for i in range(50)]
+    stream2 = [ch2.damage(f"packet_{i}".encode()) for i in range(50)]
+    assert stream1 == stream2
+
+
 def test_channel_corrupt_packet_checksum_failure():
     # Bit-corrupted packets produced by Channel.damage must fail packet.parse_packet checksum
     orig_pkt = packet.make_data(0, b"critical data chunk", True)
