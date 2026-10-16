@@ -7,6 +7,7 @@ If it stops halfway, run the same command again: rows already in the CSV
 with sha256_ok True are skipped.
 """
 
+import csv
 import hashlib
 import os
 import socket
@@ -193,5 +194,210 @@ def run_transfer(
         recv_sock.close()
         send_sock.close()
         proto.LINGER = orig_linger
+
+
+RESULT_FIELDS = [
+    "sweep", "protocol", "window", "rto", "loss", "reorder",
+    "seed", "file_size", "packets", "sent", "retx", "timeouts",
+    "dup_acks", "seconds", "goodput_bps", "goodput_kbps", "sha256_ok"
+]
+
+TRACE_FIELDS = [
+    "sweep", "protocol", "rto", "seed", "sample_idx",
+    "rtt", "srtt", "rttvar", "rto_value", "resent"
+]
+
+
+def load_completed_keys(csv_path: str) -> set:
+    """Read CSV and return set of parameter tuples already verified with sha256_ok True."""
+    completed = set()
+    if not os.path.exists(csv_path):
+        return completed
+
+    try:
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                if str(r.get("sha256_ok", "")).lower() in ("true", "1"):
+                    key = (
+                        r.get("sweep", ""),
+                        r.get("protocol", ""),
+                        int(r.get("window", 0)),
+                        r.get("rto", ""),
+                        float(r.get("loss", 0.0)),
+                        float(r.get("reorder", 0.0)),
+                        int(r.get("seed", 0)),
+                        int(r.get("file_size", 0)),
+                    )
+                    completed.add(key)
+    except Exception:
+        pass
+    return completed
+
+
+def append_result(csv_path: str, row: Dict[str, Any]) -> None:
+    """Append a single experiment result row to CSV with durable flush."""
+    write_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=RESULT_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({k: row.get(k, "") for k in RESULT_FIELDS})
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+
+
+def append_traces(traces_path: str, traces: List[Dict[str, Any]]) -> None:
+    """Append RTO trace records to trace CSV with durable flush."""
+    if not traces:
+        return
+    write_header = not os.path.exists(traces_path) or os.path.getsize(traces_path) == 0
+    with open(traces_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=TRACE_FIELDS)
+        if write_header:
+            writer.writeheader()
+        for t in traces:
+            writer.writerow({k: t.get(k, "") for k in TRACE_FIELDS})
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+
+
+def run_experiments(
+    quick: bool = False,
+    custom_configs: List[Dict[str, Any]] = None,
+    results_file: str = None,
+    traces_file: str = None,
+) -> int:
+    """Run experiment matrix with resume support and write results to CSV.
+
+    Args:
+        quick: If True, executes one seed on 64 KB writing quick.csv/quick_traces.csv.
+               If False, executes 3 seeds on 1 MB writing results.csv/traces.csv.
+        custom_configs: Optional subset of configuration dictionaries to run.
+        results_file: Custom output path for results CSV.
+        traces_file: Custom output path for traces CSV.
+
+    Returns:
+        int: Number of failed transfers.
+    """
+    if quick:
+        seeds = [1]
+        file_size = 64 * 1024
+        res_path = results_file or "quick.csv"
+        tr_path = traces_file or "quick_traces.csv"
+    else:
+        seeds = [1, 2, 3]
+        file_size = 1024 * 1024
+        res_path = results_file or "results.csv"
+        tr_path = traces_file or "traces.csv"
+
+    all_configs = custom_configs if custom_configs is not None else configs()
+    completed = load_completed_keys(res_path)
+    total_runs = len(all_configs) * len(seeds)
+    run_idx = 0
+    failures = 0
+
+    print(f"Running experiments ({'--quick' if quick else 'full matrix'}): {len(all_configs)} configs, {len(seeds)} seeds, file_size={file_size}")
+    print(f"Output: {res_path}, Traces: {tr_path}")
+    print(f"Resuming: {len(completed)} verified runs already present in {res_path}\n")
+
+    for cfg in all_configs:
+        sweep = cfg["sweep"]
+        proto = cfg["protocol"]
+        win = cfg["window"]
+        rto_policy = cfg["rto"]
+        loss = cfg["loss"]
+        reorder = cfg["reorder"]
+
+        for seed in seeds:
+            run_idx += 1
+            key = (sweep, proto, win, rto_policy, loss, reorder, seed, file_size)
+
+            if key in completed:
+                print(f"[{run_idx}/{total_runs}] SKIP (already verified) {sweep}:{proto} w={win} loss={loss} reorder={reorder} rto={rto_policy} seed={seed}")
+                continue
+
+            print(f"[{run_idx}/{total_runs}] RUN {sweep}:{proto} w={win} loss={loss} reorder={reorder} rto={rto_policy} seed={seed} ...", end=" ", flush=True)
+
+            try:
+                stats, traces = run_transfer(
+                    protocol=proto,
+                    window=win,
+                    rto_spec=rto_policy,
+                    loss=loss,
+                    reorder=reorder,
+                    seed=seed,
+                    file_size=file_size,
+                )
+
+                row = {
+                    "sweep": sweep,
+                    "protocol": proto,
+                    "window": win,
+                    "rto": rto_policy,
+                    "loss": loss,
+                    "reorder": reorder,
+                    "seed": seed,
+                    "file_size": file_size,
+                    **stats,
+                }
+
+                append_result(res_path, row)
+
+                for t in traces:
+                    t["sweep"] = sweep
+                append_traces(tr_path, traces)
+
+                if row.get("sha256_ok"):
+                    print(f"PASS (goodput={row.get('goodput_kbps')} KB/s, retx={row.get('retx')}, {row.get('seconds')}s)")
+                else:
+                    failures += 1
+                    print("FAIL (hash mismatch)")
+
+            except NotImplementedError as exc:
+                print(f"SKIP ({exc})")
+            except Exception as exc:
+                failures += 1
+                print(f"ERROR: {type(exc).__name__}: {exc}")
+                err_row = {
+                    "sweep": sweep,
+                    "protocol": proto,
+                    "window": win,
+                    "rto": rto_policy,
+                    "loss": loss,
+                    "reorder": reorder,
+                    "seed": seed,
+                    "file_size": file_size,
+                    "packets": 0,
+                    "sent": 0,
+                    "retx": 0,
+                    "timeouts": 0,
+                    "dup_acks": 0,
+                    "seconds": 0.0,
+                    "goodput_bps": 0.0,
+                    "goodput_kbps": 0.0,
+                    "sha256_ok": False,
+                }
+                append_result(res_path, err_row)
+
+    print(f"\nCompleted: {run_idx}/{total_runs} runs checked. Failures: {failures}")
+    return failures
+
+
+def main() -> None:
+    quick = "--quick" in sys.argv
+    ret = run_experiments(quick=quick)
+    sys.exit(1 if ret > 0 else 0)
+
+
+if __name__ == "__main__":
+    main()
+
 
 
