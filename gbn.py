@@ -75,12 +75,46 @@ def send_file(
 
     base = 0
     nextseq = 0
+    timer_deadline: float | None = None
+    send_times: dict[int, float] = {}
+    resent: set[int] = set()
+
     start_time = time.monotonic()
 
-    while nextseq < base + window and nextseq < total:
-        sock.sendto(packets[nextseq], peer)
-        stats["sent"] += 1
-        nextseq += 1
+    while base < total:
+        while nextseq < base + window and nextseq < total:
+            now = time.monotonic()
+            sock.sendto(packets[nextseq], peer)
+            stats["sent"] += 1
+            send_times[nextseq] = now
+
+            if base == nextseq:
+                timer_deadline = now + rto.value()
+
+            nextseq += 1
+
+        remaining = 0.0
+        if timer_deadline is not None:
+            remaining = max(0.0, timer_deadline - time.monotonic())
+
+        pkt, _ = receive(sock, remaining)
+
+        if pkt is None:
+            stats["timeouts"] += 1
+            rto.backoff()
+
+            now = time.monotonic()
+            for seq in range(base, nextseq):
+                sock.sendto(packets[seq], peer)
+                stats["sent"] += 1
+                stats["retx"] += 1
+                resent.add(seq)
+
+            timer_deadline = now + rto.value()
+
+        else:
+            if pkt["flags"] & ACK:
+                base = pkt["ack"] + 1
 
     stats["seconds"] = time.monotonic() - start_time
     return stats
