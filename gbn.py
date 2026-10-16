@@ -106,13 +106,52 @@ def send_file(
 
     base = 0
     nextseq = 0
+    timer_deadline: float | None = None
+    send_times: dict[int, float] = {}
+    resent: set[int] = set()
+
     start_time = time.monotonic()
 
-    # Transmit initial window packets respecting window capacity
-    while nextseq < base + window and nextseq < total:
-        sock.sendto(packets[nextseq], peer)
-        stats["sent"] += 1
-        nextseq += 1
+    while base < total:
+        # Transmit all packets allowed by the window limit
+        while nextseq < base + window and nextseq < total:
+            now = time.monotonic()
+            sock.sendto(packets[nextseq], peer)
+            stats["sent"] += 1
+            send_times[nextseq] = now
+
+            # If window was empty, start timer for this oldest packet
+            if base == nextseq:
+                timer_deadline = now + rto.value()
+
+            nextseq += 1
+
+        # Wait for an ACK until the base packet timer deadline
+        remaining = 0.0
+        if timer_deadline is not None:
+            remaining = max(0.0, timer_deadline - time.monotonic())
+
+        pkt, _ = receive(sock, remaining)
+
+        if pkt is None:
+            # Timeout! Base packet was not acknowledged in time.
+            stats["timeouts"] += 1
+            rto.backoff()
+
+            # Go-Back-N: Retransmit every unacknowledged packet in flight
+            now = time.monotonic()
+            for seq in range(base, nextseq):
+                sock.sendto(packets[seq], peer)
+                stats["sent"] += 1
+                stats["retx"] += 1
+                resent.add(seq)
+
+            # Restart timer
+            timer_deadline = now + rto.value()
+
+        else:
+            if pkt["flags"] & ACK:
+                base = pkt["ack"] + 1
 
     stats["seconds"] = time.monotonic() - start_time
     return stats
