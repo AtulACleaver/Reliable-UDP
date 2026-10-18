@@ -150,8 +150,31 @@ def send_file(
             timer_deadline = now + rto.value()
 
         else:
-            if pkt["flags"] & ACK:
-                base = pkt["ack"] + 1
+            if not (pkt["flags"] & ACK):
+                continue
+
+            ack = pkt["ack"]
+
+            if ack >= base:
+                # Cumulative ACK advances the window base to ack + 1
+                if ack in send_times:
+                    is_resent = ack in resent
+                    rtt = time.monotonic() - send_times[ack]
+                    rto.sample(rtt, is_resent)
+
+                base = ack + 1
+                rto.forward()
+
+                # If all outstanding packets are now ACKed, stop timer
+                # Otherwise, restart timer for the new oldest unacknowledged packet
+                if base == nextseq:
+                    timer_deadline = None
+                else:
+                    timer_deadline = time.monotonic() + rto.value()
+
+            else:
+                # ack < base: duplicate or stale ACK
+                stats["dup_acks"] += 1
 
     stats["seconds"] = time.monotonic() - start_time
     return stats
