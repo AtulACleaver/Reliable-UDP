@@ -113,8 +113,28 @@ def send_file(
             timer_deadline = now + rto.value()
 
         else:
-            if pkt["flags"] & ACK:
-                base = pkt["ack"] + 1
+            if not (pkt["flags"] & ACK):
+                continue
+
+            ack = pkt["ack"]
+
+            if ack >= base:
+                if ack in send_times:
+                    # Karn's algorithm: do not sample RTT for retransmitted packets
+                    is_resent = ack in resent
+                    rtt = time.monotonic() - send_times[ack]
+                    rto.sample(rtt, is_resent)
+
+                base = ack + 1
+                rto.forward()
+
+                if base == nextseq:
+                    timer_deadline = None
+                else:
+                    timer_deadline = time.monotonic() + rto.value()
+
+            else:
+                stats["dup_acks"] += 1
 
     stats["seconds"] = time.monotonic() - start_time
     return stats
