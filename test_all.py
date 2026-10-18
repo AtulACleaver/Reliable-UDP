@@ -970,6 +970,52 @@ def test_sr_receiver_buffers_out_of_order_and_flushes():
         sr.LINGER = orig_linger
 
 
+def test_sr_receiver_re_acks_delivered_packets():
+    """SR receiver must re-ACK packets below recv_base to stop sender retransmissions."""
+    orig_linger = sr.LINGER
+    sr.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_port = recv_sock.getsockname()[1]
+        received = []
+
+        t = threading.Thread(target=lambda: received.append(sr.recv_file(recv_sock, 4)))
+        t.start()
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(0.5)
+
+        # Send packet 0 and receive ACK
+        client.sendto(packet.make_data(0, b"first", False), ("127.0.0.1", r_port))
+        ack0_raw, _ = client.recvfrom(1024)
+        ack0 = packet.parse_packet(ack0_raw)
+        assert ack0 is not None and ack0["ack"] == 0
+
+        # Send packet 0 AGAIN (as if client lost ACK 0 and timed out)
+        client.sendto(packet.make_data(0, b"first", False), ("127.0.0.1", r_port))
+        re_ack0_raw, _ = client.recvfrom(1024)
+        re_ack0 = packet.parse_packet(re_ack0_raw)
+        # Receiver MUST re-ACK packet 0 even though base moved to 1
+        assert re_ack0 is not None and re_ack0["ack"] == 0
+
+        # Send packet 1 with FIN
+        client.sendto(packet.make_data(1, b"second", True), ("127.0.0.1", r_port))
+        ack1_raw, _ = client.recvfrom(1024)
+        ack1 = packet.parse_packet(ack1_raw)
+        assert ack1 is not None and ack1["ack"] == 1
+
+        t.join(timeout=1.0)
+        recv_sock.close()
+        client.close()
+
+        # Delivered data must contain packet 0 only once, followed by packet 1
+        assert len(received) == 1
+        assert received[0] == b"firstsecond"
+    finally:
+        sr.LINGER = orig_linger
+
+
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
 
