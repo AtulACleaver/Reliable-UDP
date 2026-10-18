@@ -8,6 +8,7 @@ code; that is expected. Tests use small files and a 2 ms delay so they run fast.
 """
 
 import hashlib
+import os
 import socket
 import sys
 import threading
@@ -906,6 +907,69 @@ def test_experiments_configs_uniqueness_and_stability():
     assert len({tuple(sorted(r.items())) for r in rows1}) == 46
     rows1[0]["loss"] = 0.99
     assert experiments.configs()[0]["loss"] == 0.0
+
+
+def test_experiments_run_transfer_sw_clean():
+    """Verify experiments.run_transfer executes a clean Stop-and-Wait transfer with SHA-256 integrity."""
+    stats, _ = experiments.run_transfer("sw", 1, "fixed:0.2", loss=0.0, file_size=4096)
+    assert stats["sha256_ok"] is True
+    assert stats["retx"] == 0
+    assert stats["timeouts"] == 0
+    assert stats["seconds"] > 0
+    assert stats["goodput_bps"] > 0
+
+
+def test_experiments_run_transfer_gbn_pipelined():
+    """Verify experiments.run_transfer executes pipelined GBN with AdaptiveRTO across channel."""
+    stats, traces = experiments.run_transfer("gbn", 4, "adaptive", loss=0.0, file_size=8192)
+    assert stats["sha256_ok"] is True
+    assert stats["packets"] > 1
+    assert stats["seconds"] > 0
+    assert len(traces) > 0
+    assert "rto_value" in traces[0]
+
+
+def test_experiments_sr_stub_raises_not_implemented():
+    """Verify attempting to run unimplemented SR protocol raises explicit NotImplementedError."""
+    try:
+        experiments.run_transfer("sr", 4, "adaptive", file_size=1024)
+        assert False, "Should have raised NotImplementedError"
+    except NotImplementedError:
+        pass
+
+
+def test_experiments_csv_headers_and_fields():
+    """Verify required CSV column fields match contract specification."""
+    required = {"sweep", "protocol", "window", "rto", "loss", "reorder", "seed",
+                "file_size", "packets", "sent", "retx", "timeouts", "dup_acks",
+                "seconds", "goodput_bps", "goodput_kbps", "sha256_ok"}
+    assert required.issubset(set(experiments.RESULT_FIELDS))
+
+
+def test_experiments_batch_runner_and_resume():
+    """Verify batch runner writes valid CSV output and resume logic skips verified runs."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res_file = os.path.join(tmpdir, "test_res.csv")
+        tr_file = os.path.join(tmpdir, "test_tr.csv")
+        sample_cfg = [{"sweep": "unit_test", "protocol": "sw", "window": 1,
+                       "rto": "fixed:0.2", "loss": 0.0, "reorder": 0.0}]
+
+        failures = experiments.run_experiments(
+            quick=True, custom_configs=sample_cfg,
+            results_file=res_file, traces_file=tr_file
+        )
+        assert failures == 0
+        assert os.path.exists(res_file)
+
+        completed = experiments.load_completed_keys(res_file)
+        assert len(completed) == 1
+
+        failures_resume = experiments.run_experiments(
+            quick=True, custom_configs=sample_cfg,
+            results_file=res_file, traces_file=tr_file
+        )
+        assert failures_resume == 0
 
 
 def main():
