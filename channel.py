@@ -14,6 +14,7 @@ repeatability across multi-protocol evaluations.
 import hashlib
 import random
 import struct
+import time
 
 
 class Channel:
@@ -27,6 +28,10 @@ class Channel:
         self.rate = rate
         self.seed = seed
         self.rng = random.Random(seed)
+        self.held = None
+        self.tokens = 64 * 1024
+        self.bucket_size = 64 * 1024
+        self.last_time = time.monotonic()
         self.attempts = {}
 
     def _decide(self, salt, seq, attempt, p):
@@ -69,6 +74,42 @@ class Channel:
         res = [bytes(pkt)]
         if self.dup > 0 and self._decide("dup", seq, attempt, self.dup):
             res.append(bytes(pkt))
+
+        # Token-bucket rate limiter: bounds throughput to emulate link capacity (bytes/sec)
+        if self.rate > 0:
+            now = time.monotonic()
+            elapsed = now - self.last_time
+            self.tokens = min(self.bucket_size, self.tokens + elapsed * self.rate)
+            self.last_time = now
+
+            cost = len(data)
+            if self.tokens < cost:
+                wait_time = (cost - self.tokens) / self.rate
+                time.sleep(wait_time)
+                self.tokens = 0
+                self.last_time = time.monotonic()
+            else:
+                self.tokens -= cost
+
+        if self.delay > 0:
+            d = self.delay
+            if self.jitter > 0:
+                d += self.rng.uniform(-self.jitter, self.jitter)
+            if d > 0:
+                time.sleep(d)
+
+        if self.reorder > 0 and self._decide("reorder", seq, attempt, self.reorder):
+            if self.held is None:
+                self.held = res
+                return []
+            else:
+                out = res + self.held
+                self.held = None
+                return out
+        elif self.held is not None:
+            out = res + self.held
+            self.held = None
+            return out
 
         return res
 

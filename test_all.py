@@ -473,6 +473,56 @@ def test_channel_determinism_drill():
     assert stream1 == stream2
 
 
+def test_channel_rate_limit():
+    ch = Channel(rate=10000, seed=42)
+    ch.tokens = 0
+    start = time.monotonic()
+    ch.damage(b"a" * 100)
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.005
+
+
+def test_channel_rate_limit_burst_capacity():
+    # When tokens are full, initial packet passes without throttling
+    ch = Channel(rate=50000, seed=42)
+    start = time.monotonic()
+    ch.damage(b"b" * 1024)
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.01
+
+
+def test_channel_rate_limit_replenishment():
+    # Tokens replenish over elapsed time up to bucket_size
+    ch = Channel(rate=20000, seed=42)
+    ch.tokens = 0
+    ch.last_time = time.monotonic() - 0.1
+    now = time.monotonic()
+    elapsed = now - ch.last_time
+    ch.tokens = min(ch.bucket_size, ch.tokens + elapsed * ch.rate)
+    assert ch.tokens >= 1500
+
+
+def test_channel_reorder_damage_flow():
+    # Reordering holds first packet and flushes inverted when second packet arrives
+    ch = Channel(reorder=1.0, seed=42)
+    p1 = packet.make_data(0, b"packet_zero", False)
+    p2 = packet.make_data(1, b"packet_one", True)
+
+    assert ch.damage(p1) == []
+    flushed = ch.damage(p2)
+    assert len(flushed) == 2
+    assert flushed[0] == p2
+    assert flushed[1] == p1
+
+
+def test_channel_jitter_bounds():
+    # Ensure jitter stays strictly bounded within [-jitter, +jitter]
+    ch = Channel(delay=0.01, jitter=0.005, seed=42)
+    for _ in range(20):
+        d = ch.delay + ch.rng.uniform(-ch.jitter, ch.jitter)
+        assert 0.005 <= d <= 0.015
+
+
 def test_channel_corrupt_packet_checksum_failure():
     # Bit-corrupted packets produced by Channel.damage must fail packet.parse_packet checksum
     orig_pkt = packet.make_data(0, b"critical data chunk", True)
