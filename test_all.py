@@ -164,6 +164,66 @@ def run(protocol: str, loss: float = 0.0, data: bytes = b"Reliable UDP Stop-and-
         finally:
             gbn.LINGER = orig_linger
 
+    if protocol == "sr":
+        orig_linger = sr.LINGER
+        sr.LINGER = 0.05
+        try:
+            recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            recv_sock.bind(("127.0.0.1", 0))
+            r_addr = recv_sock.getsockname()
+
+            send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            send_sock.bind(("127.0.0.1", 0))
+
+            res = []
+            rt = threading.Thread(target=lambda: res.append(sr.recv_file(recv_sock, 4)))
+            rt.start()
+
+            if loss > 0:
+                proxy_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                proxy_sock.bind(("127.0.0.1", 0))
+                p_addr = proxy_sock.getsockname()
+                dropped = [False]
+
+                def proxy():
+                    client_addr = None
+                    proxy_sock.settimeout(0.5)
+                    while True:
+                        try:
+                            raw, addr = proxy_sock.recvfrom(65535)
+                        except (socket.timeout, TimeoutError):
+                            break
+                        if addr == r_addr:
+                            if client_addr:
+                                proxy_sock.sendto(raw, client_addr)
+                        else:
+                            client_addr = addr
+                            if not dropped[0]:
+                                dropped[0] = True
+                                continue  # Drop first packet to force retransmission
+                            proxy_sock.sendto(raw, r_addr)
+
+                pt = threading.Thread(target=proxy)
+                pt.start()
+
+                stats = sr.send_file(send_sock, p_addr, data, 4, SimpleFixedRTO(0.04))
+                pt.join(timeout=1.0)
+                proxy_sock.close()
+            else:
+                stats = sr.send_file(send_sock, r_addr, data, 4, SimpleFixedRTO(0.04))
+
+            rt.join(timeout=1.0)
+            recv_sock.close()
+            send_sock.close()
+
+            received_data = res[0] if res else b""
+            stats["sha256_ok"] = (
+                hashlib.sha256(received_data).digest() == hashlib.sha256(data).digest()
+            )
+            return stats
+        finally:
+            sr.LINGER = orig_linger
+
     raise NotImplementedError(f"Protocol {protocol} not implemented yet")
 
 
@@ -1014,6 +1074,54 @@ def test_sr_receiver_re_acks_delivered_packets():
         assert received[0] == b"firstsecond"
     finally:
         sr.LINGER = orig_linger
+
+
+def test_sr_clean():
+    """Verify clean file transfer with Selective Repeat (no loss) and matching SHA-256."""
+    res = run("sr")
+    assert res["retx"] == 0
+    assert res["sha256_ok"] is True
+    assert res["timeouts"] == 0
+
+
+def test_sr_empty_file_transfer():
+    """Verify SR correctly handles empty file transfer (single FIN packet)."""
+    res = run("sr", data=b"")
+    assert res["packets"] == 1
+    assert res["sent"] == 1
+    assert res["retx"] == 0
+    assert res["sha256_ok"] is True
+
+
+def test_sr_sender_stats_fields():
+    """Verify all stats keys are populated accurately in SR sender."""
+    sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender_sock.bind(("127.0.0.1", 0))
+
+    responder_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    responder_sock.bind(("127.0.0.1", 0))
+    resp_addr = responder_sock.getsockname()
+
+    def respond():
+        raw, addr = responder_sock.recvfrom(2048)
+        pkt = packet.parse_packet(raw)
+        if pkt is not None:
+            responder_sock.sendto(packet.make_ack(pkt["seq"]), addr)
+
+    t = threading.Thread(target=respond)
+    t.start()
+
+    rto = SimpleFixedRTO(0.1)
+    stats = sr.send_file(sender_sock, resp_addr, b"testing sr stats", 4, rto)
+    t.join(timeout=1.0)
+    sender_sock.close()
+    responder_sock.close()
+
+    for k in ["packets", "sent", "retx", "timeouts", "dup_acks", "seconds"]:
+        assert k in stats, f"Missing key in stats: {k}"
+    assert stats["packets"] == 1
+    assert stats["sent"] == 1
+    assert stats["retx"] == 0
 
 
 def main():
