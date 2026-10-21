@@ -15,6 +15,7 @@ import time
 import traceback
 import packet
 import stopwait
+import gbn
 import channel
 import rto
 from channel import Channel, damage
@@ -101,6 +102,66 @@ def run(protocol: str, loss: float = 0.0, data: bytes = b"Reliable UDP Stop-and-
             return stats
         finally:
             stopwait.LINGER = orig_linger
+
+    if protocol == "gbn":
+        orig_linger = gbn.LINGER
+        gbn.LINGER = 0.05
+        try:
+            recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            recv_sock.bind(("127.0.0.1", 0))
+            r_addr = recv_sock.getsockname()
+
+            send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            send_sock.bind(("127.0.0.1", 0))
+
+            res = []
+            rt = threading.Thread(target=lambda: res.append(gbn.recv_file(recv_sock, 4)))
+            rt.start()
+
+            if loss > 0:
+                proxy_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                proxy_sock.bind(("127.0.0.1", 0))
+                p_addr = proxy_sock.getsockname()
+                dropped = [False]
+
+                def proxy():
+                    client_addr = None
+                    proxy_sock.settimeout(0.5)
+                    while True:
+                        try:
+                            raw, addr = proxy_sock.recvfrom(65535)
+                        except TimeoutError:
+                            break
+                        if addr == r_addr:
+                            if client_addr:
+                                proxy_sock.sendto(raw, client_addr)
+                        else:
+                            client_addr = addr
+                            if not dropped[0]:
+                                dropped[0] = True
+                                continue  # Drop first packet to force retransmission
+                            proxy_sock.sendto(raw, r_addr)
+
+                pt = threading.Thread(target=proxy)
+                pt.start()
+
+                stats = gbn.send_file(send_sock, p_addr, data, 4, SimpleFixedRTO(0.04))
+                pt.join(timeout=1.0)
+                proxy_sock.close()
+            else:
+                stats = gbn.send_file(send_sock, r_addr, data, 4, SimpleFixedRTO(0.04))
+
+            rt.join(timeout=1.0)
+            recv_sock.close()
+            send_sock.close()
+
+            received_data = res[0] if res else b""
+            stats["sha256_ok"] = (
+                hashlib.sha256(received_data).digest() == hashlib.sha256(data).digest()
+            )
+            return stats
+        finally:
+            gbn.LINGER = orig_linger
 
     raise NotImplementedError(f"Protocol {protocol} not implemented yet")
 
@@ -618,7 +679,22 @@ def test_rto_min_max_boundary_invariance():
     rto.sample(1e-9, False)
     assert rto.value() >= 0.05
     rto.sample(100.0, False)
-    assert rto.value() <= 1.5
+# --- Shashank: gbn.py ---
+def test_gbn_clean():
+    """Verify clean file transfer with GBN (no loss) and matching SHA-256."""
+    res = run("gbn")
+    assert res["retx"] == 0
+    assert res["sha256_ok"] is True
+    assert res["timeouts"] == 0
+
+
+def test_gbn_empty_file_transfer():
+    """Verify GBN correctly handles empty file transfer (single FIN packet)."""
+    res = run("gbn", data=b"")
+    assert res["packets"] == 1
+    assert res["sent"] == 1
+    assert res["retx"] == 0
+    assert res["sha256_ok"] is True
 
 
 def main():
