@@ -534,6 +534,93 @@ def test_channel_corrupt_packet_checksum_failure():
     assert packet.parse_packet(damaged[0]) is None
 
 
+def test_channel_end_to_end_adaptive_rto_transfer():
+    # Full end-to-end integration: file transfer through Channel with loss and AdaptiveRTO
+    orig_linger = stopwait.LINGER
+    stopwait.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_addr = recv_sock.getsockname()
+
+        send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        send_sock.bind(("127.0.0.1", 0))
+
+        test_data = b"Reliable-UDP Channel & AdaptiveRTO end-to-end integration payload" * 15
+        received = []
+        rt = threading.Thread(target=lambda: received.append(stopwait.recv_file(recv_sock, 1)))
+        rt.start()
+
+        ch = Channel(loss=0.1, corrupt=0.0, dup=0.0, delay=0.002, seed=123)
+        proxy_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        proxy_sock.bind(("127.0.0.1", 0))
+        p_addr = proxy_sock.getsockname()
+
+        def proxy():
+            client_addr = None
+            proxy_sock.settimeout(0.6)
+            while True:
+                try:
+                    raw, addr = proxy_sock.recvfrom(65535)
+                except (socket.timeout, TimeoutError):
+                    break
+                if addr == r_addr:
+                    if client_addr:
+                        for pkt in ch.damage(raw):
+                            proxy_sock.sendto(pkt, client_addr)
+                else:
+                    client_addr = addr
+                    for pkt in ch.damage(raw):
+                        proxy_sock.sendto(pkt, r_addr)
+
+        pt = threading.Thread(target=proxy)
+        pt.start()
+
+        adaptive_rto = AdaptiveRTO(initial=0.08, min_rto=0.02, max_rto=5.0)
+        stats = stopwait.send_file(send_sock, p_addr, test_data, 1, adaptive_rto)
+
+        pt.join(timeout=1.5)
+        rt.join(timeout=1.5)
+        proxy_sock.close()
+        recv_sock.close()
+        send_sock.close()
+
+        assert received and hashlib.sha256(received[0]).digest() == hashlib.sha256(test_data).digest()
+        assert stats["sent"] >= stats["packets"]
+        assert len(adaptive_rto.trace) > 0
+    finally:
+        stopwait.LINGER = orig_linger
+
+
+def test_rto_sub_millisecond_resolution():
+    # Verify AdaptiveRTO handles sub-millisecond samples smoothly without underflow
+    rto = AdaptiveRTO(initial=0.01, min_rto=0.001, max_rto=1.0)
+    for _ in range(10):
+        rto.sample(0.0004, False)
+    assert rto.value() >= 0.001
+    assert rto.srtt is not None and rto.srtt > 0
+
+
+def test_channel_variable_payload_corruption():
+    # Corruption preserves exact byte length across various packet sizes
+    ch = Channel(corrupt=1.0, seed=42)
+    for size in [1, 13, 100, 512, 1024]:
+        raw = b"x" * size
+        corrupted = ch.damage(raw)
+        assert len(corrupted) == 1
+        assert len(corrupted[0]) == size
+        assert corrupted[0] != raw
+
+
+def test_rto_min_max_boundary_invariance():
+    # Extreme samples must never violate [min_rto, max_rto] invariant
+    rto = AdaptiveRTO(initial=0.2, min_rto=0.05, max_rto=1.5)
+    rto.sample(1e-9, False)
+    assert rto.value() >= 0.05
+    rto.sample(100.0, False)
+    assert rto.value() <= 1.5
+
+
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
 
