@@ -49,4 +49,19 @@
 - **What the human rewrote / must review for viva:**
   - Study and internalize both Sender and Receiver FSMs from memory for live viva code modifications.
 
+### Entry 4: 2026-10-22 (Shashank - Lane 2 Day 3 Comprehensive Failure Tests)
+- **Files touched:**
+  - `tests/test_gbn_window.py`
+  - `AI-USE.md`
+- **What was asked:**
+  - Implement and verify Day 3 deliverables: tests that can actually fail covering future/unsent ACKs, boundary conditions ($W=1$ Stop-and-Wait mode), and multi-packet cumulative ACK jumps.
+- **What was accepted:**
+  - Added `test_future_or_unsent_ack_ignored`: ensures acknowledging unsent packets ($ack \ge nextseq$) returns 0 and does not move `base`.
+  - Added `test_window_size_one_degenerate`: tests that $W=1$ degrades cleanly into Stop-and-Wait ARQ.
+  - Added `test_cumulative_ack_multiple_skipped`: tests window slide across multiple skipped lost ACKs.
+  - All 10 unit tests in `tests/test_gbn_window.py` passing green; `ruff check .` clean.
+- **What the human rewrote / must review for viva:**
+  - Review test structures and edge case assertions to be prepared for live viva testing modifications.
+
+
 

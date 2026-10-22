@@ -122,3 +122,53 @@ def test_outstanding_resend_list():
     w.on_ack(3)
     # What a GBN timeout resends: 4, 5, 6
     assert w.outstanding() == [4, 5, 6]
+
+
+def test_future_or_unsent_ack_ignored():
+    """ACK for unsent packet (ack >= nextseq) is ignored and returns 0."""
+    w = SendWindow(window=5, start=0)
+    w.next_seq()  # seq 0
+    w.next_seq()  # seq 1
+
+    # Attempt to acknowledge seq 2 or 100 which have not been transmitted yet
+    assert w.on_ack(2) == 0
+    assert w.base == 0
+    assert w.on_ack(100) == 0
+    assert w.base == 0
+    assert w.outstanding() == [0, 1]
+
+
+def test_window_size_one_degenerate():
+    """Window size 1 behaves strictly as Stop-and-Wait ARQ."""
+    w = SendWindow(window=1, start=0)
+    assert w.can_send() is True
+
+    seq0 = w.next_seq()
+    assert seq0 == 0
+    assert w.can_send() is False
+
+    with pytest.raises(RuntimeError):
+        w.next_seq()
+
+    # ACK 0 frees the window
+    assert w.on_ack(0) == 1
+    assert w.is_empty() is True
+    assert w.can_send() is True
+
+    seq1 = w.next_seq()
+    assert seq1 == 1
+
+
+def test_cumulative_ack_multiple_skipped():
+    """Verify that a single cumulative ACK can jump past multiple lost ACKs."""
+    w = SendWindow(window=10, start=0)
+    for _ in range(8):  # sends 0..7
+        w.next_seq()
+
+    # ACKs 0..4 are lost, but ACK 5 arrives
+    moved = w.on_ack(5)
+    assert moved == 6
+    assert w.base == 6
+    assert w.outstanding() == [6, 7]
+    assert w.can_send() is True
+
