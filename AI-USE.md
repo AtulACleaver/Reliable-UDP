@@ -38,3 +38,15 @@
 - **What the human rewrote / must review for viva:**
   - The arithmetic logic in `rdt/window.py` and the transitions in `docs/fsm-gbn.md` must be reviewed and practiced by Shashank so he can explain and modify them live during the individual viva.
 
+### Entry 3: 2026-10-22 (Shashank - Lane 2 Day 1 Kurose 3.4.3 Full Synthesis)
+- **Files touched:**
+  - `docs/fsm-gbn.md`
+  - `AI-USE.md`
+- **What was asked:**
+  - Execute Day 1 deliverables: git identity and branch verification, full Kurose 3.4.3 study with both Sender and Receiver FSM diagrams and transition specifications.
+- **What was accepted:**
+  - Addition of Receiver FSM Mermaid diagram and transitions (R1: in-order delivery and ACK, R2: out-of-order drop and duplicate re-ACK) in `docs/fsm-gbn.md`.
+- **What the human rewrote / must review for viva:**
+  - Study and internalize both Sender and Receiver FSMs from memory for live viva code modifications.
+
+

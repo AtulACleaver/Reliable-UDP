@@ -68,3 +68,36 @@ $$\text{nextseq} - \text{base} \le \text{window}$$
 ### Transition 5: Corrupt Packet or Stale Duplicate ACK
 * **Trigger:** A packet arrives that is either corrupted (fails checksum check) or has an ACK number strictly less than `base` ($ack < base$).
 * **Action:** Discard the packet and take no action.
+
+---
+
+## 4. Receiver State Machine Diagram
+
+```mermaid
+stateDiagram-v2
+    [*] --> WAIT_FOR_PACKET: expectedseq = 1<br/>sndpkt = make_pkt(0, ACK, checksum)
+
+    WAIT_FOR_PACKET --> WAIT_FOR_PACKET: rdt_rcv(rcvpkt) && notcorrupt(rcvpkt) && hasseqnum(rcvpkt, expectedseq)<br/>─────────────────────────────────────────────<br/>extract(rcvpkt, data)<br/>deliver_data(data)<br/>sndpkt = make_pkt(expectedseq, ACK, checksum)<br/>udt_send(sndpkt)<br/>expectedseq++
+
+    WAIT_FOR_PACKET --> WAIT_FOR_PACKET: default (corrupt or out-of-order: seq != expectedseq)<br/>─────────────────────────────────────────────<br/>udt_send(sndpkt) /* re-ACK expectedseq - 1 */
+```
+
+---
+
+## 5. Receiver Transition Breakdown
+
+### Transition R1: In-Order, Uncorrupted Packet
+* **Trigger:** A packet arrives with sequence number exactly matching `expectedseq` and passing the checksum.
+* **Actions:**
+  1. Extract payload: `extract(rcvpkt, data)`.
+  2. Deliver to application layer: `deliver_data(data)`.
+  3. Generate and send ACK for `expectedseq`: `sndpkt = make_pkt(expectedseq, ACK, checksum); udt_send(sndpkt)`.
+  4. Advance expected sequence: `expectedseq = expectedseq + 1`.
+
+### Transition R2: Corrupted or Out-of-Order Packet
+* **Trigger:** A packet arrives that is corrupted or has a sequence number different from `expectedseq` ($seq \ne expectedseq$).
+* **Action:**
+  1. **Discard the packet**: GBN receiver has zero buffer. Out-of-order packets are dropped immediately.
+  2. **Re-ACK last in-order sequence**: Retransmit `sndpkt` (which contains ACK for `expectedseq - 1`).
+  3. This duplicate ACK informs the sender that an expected packet is missing and prompts cumulative synchronization.
+
