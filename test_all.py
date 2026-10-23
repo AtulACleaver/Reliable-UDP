@@ -1124,6 +1124,83 @@ def test_sr_sender_stats_fields():
     assert stats["retx"] == 0
 
 
+def test_sr_loss():
+    """Verify SR recovers from dropped packets via selective retransmission."""
+    res = run("sr", loss=0.1)
+    assert res["retx"] > 0
+    assert res["sha256_ok"] is True
+
+
+def test_sr_loss_resends_only_lost():
+    """SR sender must retransmit ONLY the dropped packet, not subsequent packets in flight."""
+    orig_linger = sr.LINGER
+    sr.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_addr = recv_sock.getsockname()
+
+        send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        send_sock.bind(("127.0.0.1", 0))
+
+        received = []
+        rt = threading.Thread(target=lambda: received.append(sr.recv_file(recv_sock, 4)))
+        rt.start()
+
+        # Proxy drops packet 1 on its first attempt, but allows packets 0, 2, 3 through
+        proxy_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        proxy_sock.bind(("127.0.0.1", 0))
+        p_addr = proxy_sock.getsockname()
+        dropped_pkt1 = [False]
+        sent_seqs = []
+
+        def proxy():
+            client_addr = None
+            proxy_sock.settimeout(0.6)
+            while True:
+                try:
+                    raw, addr = proxy_sock.recvfrom(65535)
+                except (socket.timeout, TimeoutError):
+                    break
+                if addr == r_addr:
+                    if client_addr:
+                        proxy_sock.sendto(raw, client_addr)
+                else:
+                    client_addr = addr
+                    pkt = packet.parse_packet(raw)
+                    if pkt is not None and (pkt["flags"] & packet.DATA):
+                        sent_seqs.append(pkt["seq"])
+                        if pkt["seq"] == 1 and not dropped_pkt1[0]:
+                            dropped_pkt1[0] = True
+                            continue  # Drop packet 1 once
+                    proxy_sock.sendto(raw, r_addr)
+
+        pt = threading.Thread(target=proxy)
+        pt.start()
+
+        # Send 4 chunks
+        data = b"a" * 1024 + b"b" * 1024 + b"c" * 1024 + b"d" * 500
+        stats = sr.send_file(send_sock, p_addr, data, 4, SimpleFixedRTO(0.08))
+
+        pt.join(timeout=1.0)
+        rt.join(timeout=1.0)
+        proxy_sock.close()
+        recv_sock.close()
+        send_sock.close()
+
+        assert received and received[0] == data
+        assert stats["packets"] == 4
+        # Exactly one packet was retransmitted (packet 1)
+        assert stats["retx"] == 1
+        # Packets 2 and 3 should NOT have been retransmitted!
+        # In sent_seqs: 0, 1 (dropped), 2, 3, then only 1 retransmitted: total count of 2 is 1, total count of 3 is 1
+        assert sent_seqs.count(2) == 1
+        assert sent_seqs.count(3) == 1
+        assert sent_seqs.count(1) == 2
+    finally:
+        sr.LINGER = orig_linger
+
+
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
 
