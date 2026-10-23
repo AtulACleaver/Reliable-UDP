@@ -20,6 +20,7 @@ import gbn
 import channel
 import rto
 import experiments
+import plots
 from channel import Channel, damage
 from rto import FixedRTO, AdaptiveRTO
 
@@ -970,6 +971,75 @@ def test_experiments_batch_runner_and_resume():
             results_file=res_file, traces_file=tr_file
         )
         assert failures_resume == 0
+
+
+def test_plots_data_loader_and_aggregation():
+    """Verify plots.py handles data loading, aggregation, and standard deviation calculations."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_path = os.path.join(tmpdir, "empty.csv")
+        assert plots.load_results(csv_path) == []
+        assert plots.load_traces(csv_path) == []
+
+        mock_rows = [
+            {"protocol": "gbn", "loss": 0.05, "goodput_kbps": 100.0},
+            {"protocol": "gbn", "loss": 0.05, "goodput_kbps": 120.0},
+            {"protocol": "sw", "loss": 0.05, "goodput_kbps": 50.0},
+        ]
+        agg = plots.aggregate(mock_rows, lambda r: (r["protocol"], r["loss"]), "goodput_kbps")
+        assert ("gbn", 0.05) in agg
+        mean_gbn, std_gbn, count_gbn = agg[("gbn", 0.05)]
+        assert mean_gbn == 110.0
+        assert count_gbn == 2
+        assert std_gbn > 0
+
+
+def test_plots_all_generators_and_claim_report():
+    """Verify plots.py produces all 5 plot images and claim.md report with valid content."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res_file = os.path.join(tmpdir, "results.csv")
+        tr_file = os.path.join(tmpdir, "traces.csv")
+        plots_out = os.path.join(tmpdir, "plots")
+
+        sample_rows = [
+            {"sweep": "loss", "protocol": "sw", "window": 1, "rto": "adaptive", "loss": 0.0, "reorder": 0.0, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 0, "timeouts": 0, "dup_acks": 0, "seconds": 0.01, "goodput_bps": 819200.0, "goodput_kbps": 100.0, "sha256_ok": True},
+            {"sweep": "loss", "protocol": "gbn", "window": 32, "rto": "adaptive", "loss": 0.05, "reorder": 0.0, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 0, "timeouts": 0, "dup_acks": 0, "seconds": 0.005, "goodput_bps": 1638400.0, "goodput_kbps": 200.0, "sha256_ok": True},
+            {"sweep": "window", "protocol": "gbn", "window": 16, "rto": "adaptive", "loss": 0.05, "reorder": 0.0, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 0, "timeouts": 0, "dup_acks": 0, "seconds": 0.005, "goodput_bps": 1638400.0, "goodput_kbps": 200.0, "sha256_ok": True},
+            {"sweep": "reorder", "protocol": "gbn", "window": 32, "rto": "adaptive", "loss": 0.0, "reorder": 0.05, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 1, "timeouts": 0, "dup_acks": 1, "seconds": 0.006, "goodput_bps": 1365333.0, "goodput_kbps": 166.0, "sha256_ok": True},
+            {"sweep": "rto", "protocol": "gbn", "window": 32, "rto": "adaptive", "loss": 0.05, "reorder": 0.0, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 0, "timeouts": 0, "dup_acks": 0, "seconds": 0.005, "goodput_bps": 1638400.0, "goodput_kbps": 200.0, "sha256_ok": True},
+        ]
+        sample_traces = [
+            {"sweep": "loss", "protocol": "gbn", "rto": "adaptive", "seed": 1, "sample_idx": 0, "rtt": 0.002, "srtt": 0.002, "rttvar": 0.001, "rto_value": 0.006, "resent": False},
+            {"sweep": "loss", "protocol": "gbn", "rto": "adaptive", "seed": 1, "sample_idx": 1, "rtt": 0.003, "srtt": 0.0021, "rttvar": 0.0012, "rto_value": 0.0069, "resent": False},
+        ]
+
+        for r in sample_rows:
+            experiments.append_result(res_file, r)
+        experiments.append_traces(tr_file, sample_traces)
+
+        os.makedirs(plots_out, exist_ok=True)
+        loaded_res = plots.load_results(res_file)
+        loaded_tr = plots.load_traces(tr_file)
+
+        plots.plot_goodput_vs_loss(loaded_res, os.path.join(plots_out, "plot1_goodput_vs_loss.png"))
+        plots.plot_goodput_vs_window(loaded_res, os.path.join(plots_out, "plot2_goodput_vs_window.png"))
+        plots.plot_reorder_impact(loaded_res, os.path.join(plots_out, "plot3_reorder_impact.png"))
+        plots.plot_rto_comparison(loaded_res, os.path.join(plots_out, "plot4_rto_comparison.png"))
+        plots.plot_rto_trace(loaded_tr, os.path.join(plots_out, "plot5_rto_trace.png"))
+        plots.generate_claim_report(loaded_res, os.path.join(plots_out, "claim.md"))
+
+        for i in range(1, 6):
+            p = os.path.join(plots_out, f"plot{i}_{['goodput_vs_loss', 'goodput_vs_window', 'reorder_impact', 'rto_comparison', 'rto_trace'][i-1]}.png")
+            assert os.path.exists(p)
+            assert os.path.getsize(p) > 0
+
+        claim_path = os.path.join(plots_out, "claim.md")
+        assert os.path.exists(claim_path)
+        assert os.path.getsize(claim_path) > 0
+        with open(claim_path, "r", encoding="utf-8") as f:
+            claim_text = f.read()
+            assert "Claim Evaluation" in claim_text
 
 
 def main():
