@@ -697,6 +697,130 @@ def test_gbn_empty_file_transfer():
     assert res["sha256_ok"] is True
 
 
+def test_gbn_loss():
+    """Verify GBN recovers from dropped packets via Go-Back-N retransmission."""
+    res = run("gbn", loss=0.1)
+    assert res["retx"] > 0
+    assert res["sha256_ok"] is True
+
+
+def test_gbn_sender_stats_fields():
+    """Verify all stats keys are populated accurately in GBN sender."""
+    sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender_sock.bind(("127.0.0.1", 0))
+
+    responder_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    responder_sock.bind(("127.0.0.1", 0))
+    resp_addr = responder_sock.getsockname()
+
+    def respond():
+        raw, addr = responder_sock.recvfrom(2048)
+        pkt = packet.parse_packet(raw)
+        if pkt is not None:
+            responder_sock.sendto(packet.make_ack(pkt["seq"]), addr)
+
+    t = threading.Thread(target=respond)
+    t.start()
+
+    rto = SimpleFixedRTO(0.1)
+    stats = gbn.send_file(sender_sock, resp_addr, b"testing gbn stats", 4, rto)
+    t.join(timeout=1.0)
+    sender_sock.close()
+    responder_sock.close()
+
+    for k in ["packets", "sent", "retx", "timeouts", "dup_acks", "seconds"]:
+        assert k in stats, f"Missing key in stats: {k}"
+    assert stats["packets"] == 1
+    assert stats["sent"] == 1
+    assert stats["retx"] == 0
+
+
+def test_gbn_receiver_drops_out_of_order_and_re_acks():
+    """GBN receiver must drop out-of-order packets and re-ACK expected - 1."""
+    orig_linger = gbn.LINGER
+    gbn.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_port = recv_sock.getsockname()[1]
+        received = []
+
+        t = threading.Thread(target=lambda: received.append(gbn.recv_file(recv_sock, 4)))
+        t.start()
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(0.5)
+
+        # Send packet 0 (expected)
+        client.sendto(packet.make_data(0, b"part0", False), ("127.0.0.1", r_port))
+        ack0_raw, _ = client.recvfrom(1024)
+        ack0 = packet.parse_packet(ack0_raw)
+        assert ack0 is not None and ack0["ack"] == 0
+
+        # Send packet 2 (out of order! skipping packet 1)
+        client.sendto(packet.make_data(2, b"part2", False), ("127.0.0.1", r_port))
+        # Receiver drops packet 2 and re-ACKs 0 (expected - 1)
+        re_ack0_raw, _ = client.recvfrom(1024)
+        re_ack0 = packet.parse_packet(re_ack0_raw)
+        assert re_ack0 is not None and re_ack0["ack"] == 0
+
+        # Send missing packet 1
+        client.sendto(packet.make_data(1, b"part1", False), ("127.0.0.1", r_port))
+        ack1_raw, _ = client.recvfrom(1024)
+        ack1 = packet.parse_packet(ack1_raw)
+        assert ack1 is not None and ack1["ack"] == 1
+
+        # Now send packet 2 with FIN
+        client.sendto(packet.make_data(2, b"part2", True), ("127.0.0.1", r_port))
+        ack2_raw, _ = client.recvfrom(1024)
+        ack2 = packet.parse_packet(ack2_raw)
+        assert ack2 is not None and ack2["ack"] == 2
+
+        t.join(timeout=1.0)
+        recv_sock.close()
+        client.close()
+
+        assert received[0] == b"part0part1part2"
+    finally:
+        gbn.LINGER = orig_linger
+
+
+def test_gbn_cumulative_ack_slides_multiple():
+    """Verify sender handles a cumulative ACK jumping across multiple in-flight packets."""
+    sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender_sock.bind(("127.0.0.1", 0))
+
+    responder_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    responder_sock.bind(("127.0.0.1", 0))
+    resp_addr = responder_sock.getsockname()
+
+    def respond():
+        # Receive packet 0
+        _raw0, addr = responder_sock.recvfrom(2048)
+        # Receive packet 1
+        _raw1, addr = responder_sock.recvfrom(2048)
+        # Receive packet 2
+        _raw2, addr = responder_sock.recvfrom(2048)
+        # Send cumulative ACK 2 directly (acknowledges 0, 1, 2 all at once)
+        responder_sock.sendto(packet.make_ack(2), addr)
+
+    t = threading.Thread(target=respond)
+    t.start()
+
+    # 3 chunks of data (total 3 packets)
+    data = b"x" * 2500
+    rto = SimpleFixedRTO(0.2)
+    stats = gbn.send_file(sender_sock, resp_addr, data, 4, rto)
+    t.join(timeout=1.0)
+    sender_sock.close()
+    responder_sock.close()
+
+    assert stats["packets"] == 3
+    assert stats["sent"] == 3
+    assert stats["retx"] == 0
+    assert stats["timeouts"] == 0
+
+
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
 
