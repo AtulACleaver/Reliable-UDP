@@ -63,5 +63,19 @@
 - **What the human rewrote / must review for viva:**
   - Review test structures and edge case assertions to be prepared for live viva testing modifications.
 
+### Entry 5: 2026-10-25 (Shashank - Lane 2 Day 4 & Day 5 Synthesis & Viva Prep)
+- **Files touched:**
+  - `docs/fsm-gbn.md`
+  - `AI-USE.md`
+- **What was asked:**
+  - Complete the Day 4 & Day 5 deliverables: architectural diff of pure-logic `SendWindow` against Kurose 3.4.3 textbook FSM, mathematical proof of sequence space constraint ($M \ge W + 1$), failure mode analysis, and viva drill preparation for live modification.
+- **What was accepted:**
+  - Added Section 6: Kurose 3.4.3 Diff matrix detailing separation of concerns, backpressure vs exception handling, timer heap decoupling, and cumulative ACK boundary guards.
+  - Added Section 7: Formal failure proof showing catastrophic duplicate delivery when sequence space $M = W$ under complete ACK loss, and correctness when $M \ge W + 1$.
+  - Added Section 8: Failure mode breakdown (lost cumulative ACKs, lost data packets, degenerate $W=1$ case).
+- **What the human rewrote / must review for viva:**
+  - Shashank must independently explain the sequence space proof ($M \ge W + 1$) and be prepared to write live code adjustments in `SendWindow` (e.g., modular sequence wrapping or duplicate ACK counting) during the viva examination.
+
+
 
 
