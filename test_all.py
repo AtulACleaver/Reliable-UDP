@@ -305,6 +305,138 @@ def test_sw_empty_file_transfer():
     assert res["retx"] == 0
     assert res["sha256_ok"] is True
 
+# --- Shashank: Go-Back-N SendWindow unit tests ---
+from rdt.window import SendWindow
+
+
+def test_gbn_window_init():
+    w = SendWindow(window=4, start=0)
+    assert w.window == 4
+    assert w.base == 0
+    assert w.nextseq == 0
+    assert w.is_empty() is True
+    assert w.can_send() is True
+    assert w.outstanding() == []
+
+
+def test_gbn_window_invalid_size():
+    try:
+        SendWindow(window=0)
+        assert False, "Expected ValueError"
+    except ValueError:
+        pass
+    try:
+        SendWindow(window=-5)
+        assert False, "Expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_gbn_window_can_send_fills_to_w():
+    W = 4
+    w = SendWindow(window=W, start=0)
+    for expected_seq in range(W):
+        assert w.can_send() is True
+        seq = w.next_seq()
+        assert seq == expected_seq
+    assert w.can_send() is False
+    assert w.is_empty() is False
+    assert w.outstanding() == [0, 1, 2, 3]
+    try:
+        w.next_seq()
+        assert False, "Expected RuntimeError"
+    except RuntimeError:
+        pass
+
+
+def test_gbn_window_cumulative_ack_slides_base():
+    w = SendWindow(window=5, start=0)
+    for _ in range(4):
+        w.next_seq()
+    moved = w.on_ack(1)
+    assert moved == 2
+    assert w.base == 2
+    assert w.nextseq == 4
+    assert w.can_send() is True
+    assert w.outstanding() == [2, 3]
+
+
+def test_gbn_window_stale_ack_ignored():
+    w = SendWindow(window=4, start=0)
+    for _ in range(3):
+        w.next_seq()
+    w.on_ack(1)
+    assert w.base == 2
+    assert w.on_ack(0) == 0
+    assert w.base == 2
+    assert w.outstanding() == [2]
+    assert w.on_ack(1) == 0
+    assert w.base == 2
+
+
+def test_gbn_window_ack_last_packet_empties_window():
+    w = SendWindow(window=3, start=10)
+    assert w.is_empty() is True
+    w.next_seq()
+    w.next_seq()
+    assert w.is_empty() is False
+    moved = w.on_ack(11)
+    assert moved == 2
+    assert w.base == 12
+    assert w.nextseq == 12
+    assert w.is_empty() is True
+    assert w.outstanding() == []
+    assert w.can_send() is True
+
+
+def test_gbn_window_outstanding_resend_list():
+    w = SendWindow(window=8, start=1)
+    for _ in range(6):
+        w.next_seq()
+    assert w.outstanding() == [1, 2, 3, 4, 5, 6]
+    w.on_ack(3)
+    assert w.outstanding() == [4, 5, 6]
+
+
+def test_gbn_window_future_or_unsent_ack_ignored():
+    w = SendWindow(window=5, start=0)
+    w.next_seq()
+    w.next_seq()
+    assert w.on_ack(2) == 0
+    assert w.base == 0
+    assert w.on_ack(100) == 0
+    assert w.base == 0
+    assert w.outstanding() == [0, 1]
+
+
+def test_gbn_window_size_one_degenerate():
+    w = SendWindow(window=1, start=0)
+    assert w.can_send() is True
+    seq0 = w.next_seq()
+    assert seq0 == 0
+    assert w.can_send() is False
+    try:
+        w.next_seq()
+        assert False, "Expected RuntimeError"
+    except RuntimeError:
+        pass
+    assert w.on_ack(0) == 1
+    assert w.is_empty() is True
+    assert w.can_send() is True
+    seq1 = w.next_seq()
+    assert seq1 == 1
+
+
+def test_gbn_window_cumulative_ack_multiple_skipped():
+    w = SendWindow(window=10, start=0)
+    for _ in range(8):
+        w.next_seq()
+    moved = w.on_ack(5)
+    assert moved == 6
+    assert w.base == 6
+    assert w.outstanding() == [6, 7]
+    assert w.can_send() is True
+
 
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
