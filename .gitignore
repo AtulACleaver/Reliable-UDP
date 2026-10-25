@@ -1,6 +1,11 @@
 __pycache__/
 *.py[cod]
+*.pyc
 *$py.class
 .pytest_cache/
-*.log
+.venv/
 .env
+*.log
+quick.csv
+quick_traces.csv
+.DS_Store

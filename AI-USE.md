@@ -1,4 +1,15 @@
-# AI Assistance Log
+# AI use
+
+Course rule: no AI writes core logic. Core functions are written by their owner.
+The stubs hold only signatures and the shared interface.
+
+Core: packet.py (top half), stopwait.py, gbn.py, sr.py, channel.py (damage),
+rto.py (the two classes).
+
+## Atul
+- Used AI for building `test_all.py` test suite code to review and verify whether my code was working properly.
+
+## Shashank
 
 ### Entry 1: 2026-10-02 (Shashank - Lane 2 Day 1 Setup)
 - **Files touched:**
@@ -76,6 +87,8 @@
 - **What the human rewrote / must review for viva:**
   - Shashank must independently explain the sequence space proof ($M \ge W + 1$) and be prepared to write live code adjustments in `SendWindow` (e.g., modular sequence wrapping or duplicate ACK counting) during the viva examination.
 
+## Aqifa
 
+## Archit
 
-
+## Harsha
