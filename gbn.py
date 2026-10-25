@@ -89,8 +89,7 @@ def send_file(
     Returns:
         dict: Stats mapping with keys: packets, sent, retx, timeouts, dup_acks, seconds.
     """
-    if window < 1:
-        window = 1
+    window = max(window, 1)
 
     chunks = split_file(data)
     total = len(chunks)

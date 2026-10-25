@@ -13,9 +13,10 @@ import sys
 import threading
 import time
 import traceback
+
+import gbn
 import packet
 import stopwait
-import gbn
 
 
 # --- RTO and Channel test helpers ---
@@ -66,7 +67,7 @@ def run(protocol: str, loss: float = 0.0, data: bytes = b"Reliable UDP Stop-and-
                     while True:
                         try:
                             raw, addr = proxy_sock.recvfrom(65535)
-                        except (socket.timeout, TimeoutError):
+                        except TimeoutError:
                             break
                         if addr == r_addr:
                             if client_addr:
@@ -126,7 +127,7 @@ def run(protocol: str, loss: float = 0.0, data: bytes = b"Reliable UDP Stop-and-
                     while True:
                         try:
                             raw, addr = proxy_sock.recvfrom(65535)
-                        except (socket.timeout, TimeoutError):
+                        except TimeoutError:
                             break
                         if addr == r_addr:
                             if client_addr:
@@ -321,7 +322,7 @@ def test_sw_old_ack_does_not_reset_deadline():
 
     def send_old_acks_then_correct():
         # First receive packet 0
-        raw, addr = responder_sock.recvfrom(2048)
+        _raw, addr = responder_sock.recvfrom(2048)
         # Send an old duplicate ACK for an earlier seq (e.g. 99)
         time.sleep(0.01)
         responder_sock.sendto(packet.make_ack(99), addr)
@@ -484,11 +485,11 @@ def test_gbn_cumulative_ack_slides_multiple():
 
     def respond():
         # Receive packet 0
-        raw0, addr = responder_sock.recvfrom(2048)
+        _raw0, addr = responder_sock.recvfrom(2048)
         # Receive packet 1
-        raw1, addr = responder_sock.recvfrom(2048)
+        _raw1, addr = responder_sock.recvfrom(2048)
         # Receive packet 2
-        raw2, addr = responder_sock.recvfrom(2048)
+        _raw2, addr = responder_sock.recvfrom(2048)
         # Send cumulative ACK 2 directly (acknowledges 0, 1, 2 all at once)
         responder_sock.sendto(packet.make_ack(2), addr)
 
@@ -527,7 +528,7 @@ def main():
         except NotImplementedError:
             failed += 1
             print(f"TODO {name} (not written yet)")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             failed += 1
             print(f"FAIL {name} {type(e).__name__}: {e}")
             if "-v" in sys.argv:
