@@ -103,3 +103,14 @@ class AdaptiveRTO:
 
 Fixed = FixedRTO
 Adaptive = AdaptiveRTO
+
+
+def make_rto(spec: str):
+    """'fixed:0.5' -> FixedRTO(0.5), 'adaptive' -> AdaptiveRTO(), 'adaptive-nokarn' -> AdaptiveRTO(karn=False)."""
+    if spec.startswith("fixed:"):
+        return FixedRTO(float(spec.split(":", 1)[1]))
+    if spec == "adaptive":
+        return AdaptiveRTO(karn=True)
+    if spec == "adaptive-nokarn":
+        return AdaptiveRTO(karn=False)
+    raise ValueError(f"unknown rto {spec!r}: use fixed:<seconds>, adaptive or adaptive-nokarn")
