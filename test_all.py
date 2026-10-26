@@ -15,6 +15,10 @@ import time
 import traceback
 import packet
 import stopwait
+import channel
+import rto
+from channel import Channel, damage
+from rto import FixedRTO, AdaptiveRTO
 
 
 # --- RTO and Channel test helpers ---
@@ -304,6 +308,317 @@ def test_sw_empty_file_transfer():
     assert res["sent"] == 1
     assert res["retx"] == 0
     assert res["sha256_ok"] is True
+
+
+# --- Archit: rto.py & channel.py ---
+def test_rto_fixed():
+    rto_inst = FixedRTO(0.2)
+    assert abs(rto_inst.value() - 0.2) < 1e-6
+    rto_inst.sample(0.05, False)
+    assert abs(rto_inst.value() - 0.2) < 1e-6
+    rto_inst.backoff()
+    assert abs(rto_inst.value() - 0.4) < 1e-6
+    rto_inst.forward()
+    assert abs(rto_inst.value() - 0.2) < 1e-6
+
+
+def test_rto_adaptive():
+    rto_inst = AdaptiveRTO(initial=0.2, min_rto=0.05, max_rto=10.0)
+    assert abs(rto_inst.value() - 0.2) < 1e-6
+
+    rto_inst.sample(0.1, False)
+    assert rto_inst.srtt == 0.1
+    assert rto_inst.rttvar == 0.05
+    assert abs(rto_inst.value() - 0.3) < 1e-6
+
+    rto_inst.sample(0.2, True)
+    assert rto_inst.srtt == 0.1
+
+    rto_inst.backoff()
+    assert abs(rto_inst.value() - 0.6) < 1e-6
+
+    rto_inst.forward()
+    assert abs(rto_inst.value() - 0.3) < 1e-6
+
+
+def test_rto_adaptive_first_sample():
+    # RFC 6298 Section 2.2: SRTT <- R, RTTVAR <- R/2, RTO <- SRTT + 4 * RTTVAR = 3 * R
+    rto = AdaptiveRTO(initial=1.0, min_rto=0.01, max_rto=10.0)
+    rto.sample(0.08, False)
+    assert abs(rto.srtt - 0.08) < 1e-6
+    assert abs(rto.rttvar - 0.04) < 1e-6
+    assert abs(rto.value() - 0.24) < 1e-6
+
+
+def test_rto_adaptive_clamping():
+    # Clamping against min_rto and max_rto
+    rto = AdaptiveRTO(initial=0.2, min_rto=0.05, max_rto=2.0)
+    rto.sample(0.001, False)
+    assert rto.value() >= 0.05
+    for _ in range(10):
+        rto.backoff()
+    assert rto.value() <= 2.0
+
+
+def test_rto_adaptive_backoff_and_forward():
+    rto = AdaptiveRTO(initial=0.2, min_rto=0.05, max_rto=5.0)
+    rto.sample(0.1, False)
+    assert abs(rto.value() - 0.3) < 1e-6
+    rto.backoff()
+    assert abs(rto.value() - 0.6) < 1e-6
+    rto.backoff()
+    assert abs(rto.value() - 1.2) < 1e-6
+    rto.forward()
+    assert abs(rto.value() - 0.3) < 1e-6
+
+
+def test_rto_adaptive_variance_tracking():
+    # Steady samples reduce variance; a spike immediately increases RTTVAR
+    rto = AdaptiveRTO(initial=0.2, min_rto=0.01, max_rto=10.0)
+    for _ in range(8):
+        rto.sample(0.1, False)
+    steady_var = rto.rttvar
+
+    rto.sample(0.3, False)
+    assert rto.rttvar > steady_var
+
+
+def test_rto_karn_toggle():
+    rto_inst = AdaptiveRTO(initial=0.2, karn=False)
+    rto_inst.sample(0.1, False)
+    assert rto_inst.srtt == 0.1
+    rto_inst.sample(0.2, True)
+    assert rto_inst.srtt != 0.1
+    assert len(rto_inst.trace) == 2
+
+
+def test_rto_karn_retransmission_ignored():
+    # When karn=True (default), samples for resent packets are discarded
+    rto = AdaptiveRTO(initial=0.2, karn=True)
+    rto.sample(0.1, False)
+    srtt_before = rto.srtt
+    rttvar_before = rto.rttvar
+    rto_val_before = rto.value()
+
+    rto.sample(0.5, True)  # resent=True should be ignored
+    assert rto.srtt == srtt_before
+    assert rto.rttvar == rttvar_before
+    assert rto.value() == rto_val_before
+    assert len(rto.trace) == 1
+
+
+def test_rto_trace_logging():
+    # Verify trace entries have complete metrics for plotting and analysis
+    rto = AdaptiveRTO(initial=0.2)
+    rto.sample(0.08, False)
+    assert len(rto.trace) == 1
+    entry = rto.trace[0]
+    for key in ["rtt", "srtt", "rttvar", "rto", "resent"]:
+        assert key in entry
+    assert entry["resent"] is False
+    assert abs(entry["rtt"] - 0.08) < 1e-6
+
+
+def test_channel_damage():
+    ch = Channel(loss=1.0, seed=42)
+    assert ch.damage(b"hello") == []
+
+    ch_clean = Channel(loss=0.0, corrupt=0.0, dup=0.0, delay=0.0, seed=42)
+    assert ch_clean.damage(b"hello") == [b"hello"]
+
+    ch_dup = Channel(dup=1.0, seed=42)
+    assert ch_dup.damage(b"hello") == [b"hello", b"hello"]
+
+    ch_corrupt = Channel(corrupt=1.0, seed=42)
+    damaged = ch_corrupt.damage(b"hello")
+    assert len(damaged) == 1
+    assert damaged[0] != b"hello"
+    assert len(damaged[0]) == len(b"hello")
+
+
+def test_channel_determinism():
+    ch1 = Channel(loss=0.5, corrupt=0.2, seed=12345)
+    ch2 = Channel(loss=0.5, corrupt=0.2, seed=12345)
+    p1 = [ch1.damage(b"\x00\x00\x00\x01data") for _ in range(10)]
+    p2 = [ch2.damage(b"\x00\x00\x00\x01data") for _ in range(10)]
+    assert p1 == p2
+
+
+def test_channel_determinism_seed_divergence():
+    # Different seeds must produce different impairment outcomes
+    ch1 = Channel(loss=0.5, corrupt=0.2, seed=11111)
+    ch2 = Channel(loss=0.5, corrupt=0.2, seed=99999)
+    p1 = [ch1.damage(b"\x00\x00\x00\x01data") for _ in range(20)]
+    p2 = [ch2.damage(b"\x00\x00\x00\x01data") for _ in range(20)]
+    assert p1 != p2
+
+
+def test_channel_attempt_tracking():
+    # Retransmissions of the same seq advance the attempt counter
+    ch = Channel(loss=0.0, corrupt=0.0, seed=42)
+    pkt = b"\x00\x00\x00\x07payload"
+    ch.damage(pkt)
+    assert ch.attempts.get(7) == 1
+    ch.damage(pkt)
+    assert ch.attempts.get(7) == 2
+
+
+def test_channel_determinism_drill():
+    # Determinism drill: Two independent channel instances with identical seed yield exact decisions
+    ch1 = Channel(loss=0.25, corrupt=0.1, dup=0.1, reorder=0.1, seed=98765)
+    ch2 = Channel(loss=0.25, corrupt=0.1, dup=0.1, reorder=0.1, seed=98765)
+
+    stream1 = [ch1.damage(f"packet_{i}".encode()) for i in range(50)]
+    stream2 = [ch2.damage(f"packet_{i}".encode()) for i in range(50)]
+    assert stream1 == stream2
+
+
+def test_channel_rate_limit():
+    ch = Channel(rate=10000, seed=42)
+    ch.tokens = 0
+    start = time.monotonic()
+    ch.damage(b"a" * 100)
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.005
+
+
+def test_channel_rate_limit_burst_capacity():
+    # When tokens are full, initial packet passes without throttling
+    ch = Channel(rate=50000, seed=42)
+    start = time.monotonic()
+    ch.damage(b"b" * 1024)
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.01
+
+
+def test_channel_rate_limit_replenishment():
+    # Tokens replenish over elapsed time up to bucket_size
+    ch = Channel(rate=20000, seed=42)
+    ch.tokens = 0
+    ch.last_time = time.monotonic() - 0.1
+    now = time.monotonic()
+    elapsed = now - ch.last_time
+    ch.tokens = min(ch.bucket_size, ch.tokens + elapsed * ch.rate)
+    assert ch.tokens >= 1500
+
+
+def test_channel_reorder_damage_flow():
+    # Reordering holds first packet and flushes inverted when second packet arrives
+    ch = Channel(reorder=1.0, seed=42)
+    p1 = packet.make_data(0, b"packet_zero", False)
+    p2 = packet.make_data(1, b"packet_one", True)
+
+    assert ch.damage(p1) == []
+    flushed = ch.damage(p2)
+    assert len(flushed) == 2
+    assert flushed[0] == p2
+    assert flushed[1] == p1
+
+
+def test_channel_jitter_bounds():
+    # Ensure jitter stays strictly bounded within [-jitter, +jitter]
+    ch = Channel(delay=0.01, jitter=0.005, seed=42)
+    for _ in range(20):
+        d = ch.delay + ch.rng.uniform(-ch.jitter, ch.jitter)
+        assert 0.005 <= d <= 0.015
+
+
+def test_channel_corrupt_packet_checksum_failure():
+    # Bit-corrupted packets produced by Channel.damage must fail packet.parse_packet checksum
+    orig_pkt = packet.make_data(0, b"critical data chunk", True)
+    assert packet.parse_packet(orig_pkt) is not None
+
+    ch = Channel(corrupt=1.0, seed=42)
+    damaged = ch.damage(orig_pkt)
+    assert len(damaged) == 1
+    assert packet.parse_packet(damaged[0]) is None
+
+
+def test_channel_end_to_end_adaptive_rto_transfer():
+    # Full end-to-end integration: file transfer through Channel with loss and AdaptiveRTO
+    orig_linger = stopwait.LINGER
+    stopwait.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_addr = recv_sock.getsockname()
+
+        send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        send_sock.bind(("127.0.0.1", 0))
+
+        test_data = b"Reliable-UDP Channel & AdaptiveRTO end-to-end integration payload" * 15
+        received = []
+        rt = threading.Thread(target=lambda: received.append(stopwait.recv_file(recv_sock, 1)))
+        rt.start()
+
+        ch = Channel(loss=0.1, corrupt=0.0, dup=0.0, delay=0.002, seed=123)
+        proxy_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        proxy_sock.bind(("127.0.0.1", 0))
+        p_addr = proxy_sock.getsockname()
+
+        def proxy():
+            client_addr = None
+            proxy_sock.settimeout(0.6)
+            while True:
+                try:
+                    raw, addr = proxy_sock.recvfrom(65535)
+                except (socket.timeout, TimeoutError):
+                    break
+                if addr == r_addr:
+                    if client_addr:
+                        for pkt in ch.damage(raw):
+                            proxy_sock.sendto(pkt, client_addr)
+                else:
+                    client_addr = addr
+                    for pkt in ch.damage(raw):
+                        proxy_sock.sendto(pkt, r_addr)
+
+        pt = threading.Thread(target=proxy)
+        pt.start()
+
+        adaptive_rto = AdaptiveRTO(initial=0.08, min_rto=0.02, max_rto=5.0)
+        stats = stopwait.send_file(send_sock, p_addr, test_data, 1, adaptive_rto)
+
+        pt.join(timeout=1.5)
+        rt.join(timeout=1.5)
+        proxy_sock.close()
+        recv_sock.close()
+        send_sock.close()
+
+        assert received and hashlib.sha256(received[0]).digest() == hashlib.sha256(test_data).digest()
+        assert stats["sent"] >= stats["packets"]
+        assert len(adaptive_rto.trace) > 0
+    finally:
+        stopwait.LINGER = orig_linger
+
+
+def test_rto_sub_millisecond_resolution():
+    # Verify AdaptiveRTO handles sub-millisecond samples smoothly without underflow
+    rto = AdaptiveRTO(initial=0.01, min_rto=0.001, max_rto=1.0)
+    for _ in range(10):
+        rto.sample(0.0004, False)
+    assert rto.value() >= 0.001
+    assert rto.srtt is not None and rto.srtt > 0
+
+
+def test_channel_variable_payload_corruption():
+    # Corruption preserves exact byte length across various packet sizes
+    ch = Channel(corrupt=1.0, seed=42)
+    for size in [1, 13, 100, 512, 1024]:
+        raw = b"x" * size
+        corrupted = ch.damage(raw)
+        assert len(corrupted) == 1
+        assert len(corrupted[0]) == size
+        assert corrupted[0] != raw
+
+
+def test_rto_min_max_boundary_invariance():
+    # Extreme samples must never violate [min_rto, max_rto] invariant
+    rto = AdaptiveRTO(initial=0.2, min_rto=0.05, max_rto=1.5)
+    rto.sample(1e-9, False)
+    assert rto.value() >= 0.05
+    rto.sample(100.0, False)
+    assert rto.value() <= 1.5
 
 
 def main():
