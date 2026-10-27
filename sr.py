@@ -15,45 +15,31 @@ IDLE = 30.0
 
 
 class TimerHeap:
-    """
-    Min-heap of per-packet retransmission deadlines with lazy cancellation.
-
-    Supports clock injection for deterministic, socket-free unit testing.
-    Uses an epoch counter to guarantee that rescheduled or cancelled timers
-    never trigger spuriously when popped.
-    """
+    """Min-heap of per-packet retransmission deadlines with lazy cancellation."""
 
     def __init__(self, clock: Callable[[], float] = time.monotonic):
         self.clock = clock
-        self.heap: list[tuple[float, int, int]] = []  # (deadline, seq, epoch)
-        self.live: dict[int, int] = {}  # seq -> epoch
-        self._epoch_counter = 0
+        self.heap: list[tuple[float, int, int]] = []
+        self.live: dict[int, int] = {}
+        self._epoch = 0
 
     def schedule(self, seq: int, rto: float) -> None:
-        """Schedule or reschedule a deadline for sequence number `seq`."""
-        self._epoch_counter += 1
-        epoch = self._epoch_counter
-        self.live[seq] = epoch
-        deadline = self.clock() + rto
-        heapq.heappush(self.heap, (deadline, seq, epoch))
+        self._epoch += 1
+        self.live[seq] = self._epoch
+        heapq.heappush(self.heap, (self.clock() + rto, seq, self._epoch))
 
     def start(self, seq: int, deadline: float) -> None:
-        """Schedule with an absolute deadline."""
-        self._epoch_counter += 1
-        epoch = self._epoch_counter
-        self.live[seq] = epoch
-        heapq.heappush(self.heap, (deadline, seq, epoch))
+        self._epoch += 1
+        self.live[seq] = self._epoch
+        heapq.heappush(self.heap, (deadline, seq, self._epoch))
 
     def cancel(self, seq: int) -> None:
-        """Cancel the active timer for sequence `seq` via lazy deletion."""
         self.live.pop(seq, None)
 
     def is_active(self, seq: int) -> bool:
-        """Check if sequence `seq` currently has an active timer."""
         return seq in self.live
 
     def next_deadline(self) -> float | None:
-        """Return earliest active deadline, discarding stale/cancelled entries."""
         while self.heap:
             deadline, seq, epoch = self.heap[0]
             if self.live.get(seq) == epoch:
@@ -62,14 +48,10 @@ class TimerHeap:
         return None
 
     def time_to_next_deadline(self) -> float | None:
-        """Return remaining seconds until next deadline, or None if heap is empty."""
         nxt = self.next_deadline()
-        if nxt is None:
-            return None
-        return max(0.0, nxt - self.clock())
+        return max(0.0, nxt - self.clock()) if nxt is not None else None
 
     def pop_expired(self, now: float | None = None) -> list[int]:
-        """Pop and return all sequence numbers whose deadlines have expired by `now`."""
         if now is None:
             now = self.clock()
         expired: list[int] = []
@@ -85,24 +67,7 @@ class TimerHeap:
 
 
 def recv_file(sock: socket.socket, window: int) -> bytes:
-    """
-    Receive a file using Selective Repeat ARQ.
-
-    Maintains a receive buffer of capacity `window`.
-    - If arriving packet seq in [recv_base .. recv_base + window - 1]:
-      Send individual ACK for seq, buffer payload.
-      If seq == recv_base: advance recv_base and flush contiguous buffered packets.
-    - If arriving packet seq in [recv_base - window .. recv_base - 1] (or seq < recv_base):
-      Re-ACK seq so sender knows it arrived even if earlier ACK was lost.
-    - Otherwise: ignore out-of-window packet.
-
-    Args:
-        sock: Bound UDP socket to receive from.
-        window: Receive window capacity.
-
-    Returns:
-        bytes: Complete reassembled file payload.
-    """
+    """Receive a file using Selective Repeat ARQ with out-of-order buffering."""
     window = max(window, 1)
     recv_base = 0
     buffered: dict[int, bytes] = {}
@@ -113,7 +78,6 @@ def recv_file(sock: socket.socket, window: int) -> bytes:
     while True:
         timeout = LINGER if fin_seen else IDLE
         pkt, addr = receive(sock, timeout)
-
         if pkt is None:
             break
 
@@ -121,7 +85,6 @@ def recv_file(sock: socket.socket, window: int) -> bytes:
             continue
 
         seq = pkt["seq"]
-
         if pkt["flags"] & FIN:
             fin_seq = seq
 
@@ -129,15 +92,14 @@ def recv_file(sock: socket.socket, window: int) -> bytes:
             sock.sendto(make_ack(seq), addr)
             buffered[seq] = pkt["payload"]
 
-            if seq == recv_base:
-                while recv_base in buffered:
-                    payload = buffered.pop(recv_base)
-                    chunks.append(payload)
-                    if fin_seq is not None and recv_base == fin_seq:
-                        fin_seen = True
-                    recv_base += 1
+            while recv_base in buffered:
+                chunks.append(buffered.pop(recv_base))
+                if fin_seq is not None and recv_base == fin_seq:
+                    fin_seen = True
+                recv_base += 1
 
         elif seq < recv_base:
+            # Re-ACK delivered packet if earlier ACK was dropped
             sock.sendto(make_ack(seq), addr)
 
     return b"".join(chunks)
@@ -150,23 +112,7 @@ def send_file(
     window: int,
     rto: "FixedRTO | AdaptiveRTO",
 ) -> dict:
-    """
-    Transmit data using Selective Repeat pipelined ARQ with individual packet timers.
-
-    Maintains window invariant: nextseq - send_base <= window.
-    Maintains independent timer per in-flight unacknowledged packet using TimerHeap.
-    Upon timeout of any packet, resends ONLY that packet.
-
-    Args:
-        sock: Bound UDP socket to transmit from.
-        peer: Destination (host, port) tuple.
-        data: File bytes to transfer.
-        window: Sender window capacity.
-        rto: Retransmission timeout estimator.
-
-    Returns:
-        dict: Stats mapping with keys: packets, sent, retx, timeouts, dup_acks, seconds.
-    """
+    """Send a file using Selective Repeat ARQ with per-packet timers."""
     window = max(window, 1)
     chunks = split_file(data)
     total = len(chunks)
@@ -187,7 +133,6 @@ def send_file(
     timer_heap = TimerHeap()
     send_times: dict[int, float] = {}
     resent: set[int] = set()
-
     start_time = time.monotonic()
 
     while send_base < total:
@@ -207,7 +152,6 @@ def send_file(
 
         now = time.monotonic()
         expired = timer_heap.pop_expired(now + 0.0005 if pkt is None else now)
-
         if expired:
             stats["timeouts"] += len(expired)
             rto.backoff()
@@ -224,19 +168,14 @@ def send_file(
                 continue
 
             ack = pkt["ack"]
-
-            if ack < send_base:
-                stats["dup_acks"] += 1
-            elif ack in acked:
+            if ack < send_base or ack in acked:
                 stats["dup_acks"] += 1
             elif send_base <= ack < nextseq:
                 acked.add(ack)
                 timer_heap.cancel(ack)
 
                 if ack in send_times:
-                    is_resent = ack in resent
-                    rtt = time.monotonic() - send_times[ack]
-                    rto.sample(rtt, is_resent)
+                    rto.sample(time.monotonic() - send_times[ack], ack in resent)
 
                 rto.forward()
 
