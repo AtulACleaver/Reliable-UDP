@@ -8,6 +8,7 @@ code; that is expected. Tests use small files and a 2 ms delay so they run fast.
 """
 
 import hashlib
+import os
 import socket
 import sys
 import threading
@@ -19,6 +20,8 @@ import gbn
 import channel
 import rto
 import sr
+import experiments
+import plots
 from channel import Channel, damage
 from rto import FixedRTO, AdaptiveRTO
 
@@ -1199,6 +1202,225 @@ def test_sr_loss_resends_only_lost():
         assert sent_seqs.count(1) == 2
     finally:
         sr.LINGER = orig_linger
+ 
+ 
+# --- Harsha: experiments.py & plots.py ---
+def test_experiments_configs_shape_and_types():
+    """Verify configs returns 46 parameter dictionaries with exact required keys and types."""
+    rows = experiments.configs()
+    assert isinstance(rows, list)
+    assert len(rows) == 46
+    keys = {"sweep", "protocol", "window", "rto", "loss", "reorder"}
+    for row in rows:
+        assert set(row) == keys
+        assert isinstance(row["window"], int)
+        assert isinstance(row["loss"], float)
+        assert isinstance(row["reorder"], float)
+        for k in ("sweep", "protocol", "rto"):
+            assert isinstance(row[k], str)
+
+
+def test_experiments_configs_counts():
+    """Verify exact count of configurations allocated to each experiment sweep."""
+    rows = experiments.configs()
+    counts = {}
+    for r in rows:
+        counts[r["sweep"]] = counts.get(r["sweep"], 0) + 1
+    assert counts == {"loss": 18, "window": 12, "reorder": 10, "rto": 6}
+
+
+def test_experiments_configs_loss_grid():
+    """Verify loss sweep tests sw, gbn, sr across all 6 loss rates with controls."""
+    rows = [r for r in experiments.configs() if r["sweep"] == "loss"]
+    expected_protocols = {"sw", "gbn", "sr"}
+    expected_losses = {0.0, 0.01, 0.02, 0.05, 0.1, 0.2}
+    combos = {(r["protocol"], r["loss"]) for r in rows}
+    assert len(combos) == 18
+    assert {p for p, _ in combos} == expected_protocols
+    assert {l for _, l in combos} == expected_losses
+    for r in rows:
+        assert r["window"] == (1 if r["protocol"] == "sw" else 32)
+        assert r["rto"] == "adaptive"
+        assert r["reorder"] == 0.0
+
+
+def test_experiments_configs_window_grid():
+    """Verify window sweep tests gbn and sr across 6 window sizes with controls."""
+    rows = [r for r in experiments.configs() if r["sweep"] == "window"]
+    combos = {(r["protocol"], r["window"]) for r in rows}
+    assert len(combos) == 12
+    assert {p for p, _ in combos} == {"gbn", "sr"}
+    assert {w for _, w in combos} == {1, 4, 16, 32, 64, 128}
+    for r in rows:
+        assert r["loss"] == 0.05
+        assert r["rto"] == "adaptive"
+        assert r["reorder"] == 0.0
+
+
+def test_experiments_configs_reorder_and_rto_grids():
+    """Verify reorder and RTO parameter sweeps contain expected settings and controls."""
+    reorder_rows = [r for r in experiments.configs() if r["sweep"] == "reorder"]
+    assert len(reorder_rows) == 10
+    reorder_combos = {(r["protocol"], r["reorder"]) for r in reorder_rows}
+    assert {p for p, _ in reorder_combos} == {"gbn", "sr"}
+    assert {ro for _, ro in reorder_combos} == {0.0, 0.01, 0.05, 0.1, 0.2}
+    for r in reorder_rows:
+        assert r["window"] == 32
+        assert r["rto"] == "adaptive"
+        assert r["loss"] == 0.0
+
+    rto_rows = [r for r in experiments.configs() if r["sweep"] == "rto"]
+    assert len(rto_rows) == 6
+    rto_combos = {(r["protocol"], r["rto"]) for r in rto_rows}
+    assert {p for p, _ in rto_combos} == {"gbn", "sr"}
+    assert {policy for _, policy in rto_combos} == {"fixed:0.5", "adaptive", "adaptive-nokarn"}
+    for r in rto_rows:
+        assert r["window"] == 32
+        assert r["loss"] == 0.05
+        assert r["reorder"] == 0.0
+
+
+def test_experiments_configs_uniqueness_and_stability():
+    """Verify all 46 configuration dicts are unique, non-aliased, and call-stable."""
+    rows1 = experiments.configs()
+    rows2 = experiments.configs()
+    assert rows1 == rows2
+    assert len({tuple(sorted(r.items())) for r in rows1}) == 46
+    rows1[0]["loss"] = 0.99
+    assert experiments.configs()[0]["loss"] == 0.0
+
+
+def test_experiments_run_transfer_sw_clean():
+    """Verify experiments.run_transfer executes a clean Stop-and-Wait transfer with SHA-256 integrity."""
+    stats, _ = experiments.run_transfer("sw", 1, "fixed:0.2", loss=0.0, file_size=4096)
+    assert stats["sha256_ok"] is True
+    assert stats["retx"] == 0
+    assert stats["timeouts"] == 0
+    assert stats["seconds"] > 0
+    assert stats["goodput_bps"] > 0
+
+
+def test_experiments_run_transfer_gbn_pipelined():
+    """Verify experiments.run_transfer executes pipelined GBN with AdaptiveRTO across channel."""
+    stats, traces = experiments.run_transfer("gbn", 4, "adaptive", loss=0.0, file_size=8192)
+    assert stats["sha256_ok"] is True
+    assert stats["packets"] > 1
+    assert stats["seconds"] > 0
+    assert len(traces) > 0
+    assert "rto_value" in traces[0]
+
+
+def test_experiments_run_transfer_sr_pipelined():
+    """Verify experiments.run_transfer executes pipelined SR with AdaptiveRTO across channel."""
+    stats, traces = experiments.run_transfer("sr", 4, "adaptive", loss=0.0, file_size=8192)
+    assert stats["sha256_ok"] is True
+    assert stats["packets"] > 1
+    assert stats["seconds"] > 0
+    assert len(traces) > 0
+    assert "rto_value" in traces[0]
+
+
+def test_experiments_csv_headers_and_fields():
+    """Verify required CSV column fields match contract specification."""
+    required = {"sweep", "protocol", "window", "rto", "loss", "reorder", "seed",
+                "file_size", "packets", "sent", "retx", "timeouts", "dup_acks",
+                "seconds", "goodput_bps", "goodput_kbps", "sha256_ok"}
+    assert required.issubset(set(experiments.RESULT_FIELDS))
+
+
+def test_experiments_batch_runner_and_resume():
+    """Verify batch runner writes valid CSV output and resume logic skips verified runs."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res_file = os.path.join(tmpdir, "test_res.csv")
+        tr_file = os.path.join(tmpdir, "test_tr.csv")
+        sample_cfg = [{"sweep": "unit_test", "protocol": "sw", "window": 1,
+                       "rto": "fixed:0.2", "loss": 0.0, "reorder": 0.0}]
+
+        failures = experiments.run_experiments(
+            quick=True, custom_configs=sample_cfg,
+            results_file=res_file, traces_file=tr_file
+        )
+        assert failures == 0
+        assert os.path.exists(res_file)
+
+        completed = experiments.load_completed_keys(res_file)
+        assert len(completed) == 1
+
+        failures_resume = experiments.run_experiments(
+            quick=True, custom_configs=sample_cfg,
+            results_file=res_file, traces_file=tr_file
+        )
+        assert failures_resume == 0
+
+
+def test_plots_data_loader_and_aggregation():
+    """Verify plots.py handles data loading, aggregation, and standard deviation calculations."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_path = os.path.join(tmpdir, "empty.csv")
+        assert plots.load_results(csv_path) == []
+        assert plots.load_traces(csv_path) == []
+
+        mock_rows = [
+            {"protocol": "gbn", "loss": 0.05, "goodput_kbps": 100.0},
+            {"protocol": "gbn", "loss": 0.05, "goodput_kbps": 120.0},
+            {"protocol": "sw", "loss": 0.05, "goodput_kbps": 50.0},
+        ]
+        agg = plots.aggregate(mock_rows, lambda r: (r["protocol"], r["loss"]), "goodput_kbps")
+        assert ("gbn", 0.05) in agg
+        mean_gbn, std_gbn, count_gbn = agg[("gbn", 0.05)]
+        assert mean_gbn == 110.0
+        assert count_gbn == 2
+        assert std_gbn > 0
+
+
+def test_plots_all_generators_and_claim_report():
+    """Verify plots.py produces all 5 plot images and claim.md report with valid content."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res_file = os.path.join(tmpdir, "results.csv")
+        tr_file = os.path.join(tmpdir, "traces.csv")
+        plots_out = os.path.join(tmpdir, "plots")
+
+        sample_rows = [
+            {"sweep": "loss", "protocol": "sw", "window": 1, "rto": "adaptive", "loss": 0.0, "reorder": 0.0, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 0, "timeouts": 0, "dup_acks": 0, "seconds": 0.01, "goodput_bps": 819200.0, "goodput_kbps": 100.0, "sha256_ok": True},
+            {"sweep": "loss", "protocol": "gbn", "window": 32, "rto": "adaptive", "loss": 0.05, "reorder": 0.0, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 0, "timeouts": 0, "dup_acks": 0, "seconds": 0.005, "goodput_bps": 1638400.0, "goodput_kbps": 200.0, "sha256_ok": True},
+            {"sweep": "window", "protocol": "gbn", "window": 16, "rto": "adaptive", "loss": 0.05, "reorder": 0.0, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 0, "timeouts": 0, "dup_acks": 0, "seconds": 0.005, "goodput_bps": 1638400.0, "goodput_kbps": 200.0, "sha256_ok": True},
+            {"sweep": "reorder", "protocol": "gbn", "window": 32, "rto": "adaptive", "loss": 0.0, "reorder": 0.05, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 1, "timeouts": 0, "dup_acks": 1, "seconds": 0.006, "goodput_bps": 1365333.0, "goodput_kbps": 166.0, "sha256_ok": True},
+            {"sweep": "rto", "protocol": "gbn", "window": 32, "rto": "adaptive", "loss": 0.05, "reorder": 0.0, "seed": 1, "file_size": 1024, "packets": 1, "sent": 1, "retx": 0, "timeouts": 0, "dup_acks": 0, "seconds": 0.005, "goodput_bps": 1638400.0, "goodput_kbps": 200.0, "sha256_ok": True},
+        ]
+        sample_traces = [
+            {"sweep": "loss", "protocol": "gbn", "rto": "adaptive", "seed": 1, "sample_idx": 0, "rtt": 0.002, "srtt": 0.002, "rttvar": 0.001, "rto_value": 0.006, "resent": False},
+            {"sweep": "loss", "protocol": "gbn", "rto": "adaptive", "seed": 1, "sample_idx": 1, "rtt": 0.003, "srtt": 0.0021, "rttvar": 0.0012, "rto_value": 0.0069, "resent": False},
+        ]
+
+        for r in sample_rows:
+            experiments.append_result(res_file, r)
+        experiments.append_traces(tr_file, sample_traces)
+
+        os.makedirs(plots_out, exist_ok=True)
+        loaded_res = plots.load_results(res_file)
+        loaded_tr = plots.load_traces(tr_file)
+
+        plots.plot_goodput_vs_loss(loaded_res, os.path.join(plots_out, "plot1_goodput_vs_loss.png"))
+        plots.plot_goodput_vs_window(loaded_res, os.path.join(plots_out, "plot2_goodput_vs_window.png"))
+        plots.plot_reorder_impact(loaded_res, os.path.join(plots_out, "plot3_reorder_impact.png"))
+        plots.plot_rto_comparison(loaded_res, os.path.join(plots_out, "plot4_rto_comparison.png"))
+        plots.plot_rto_trace(loaded_tr, os.path.join(plots_out, "plot5_rto_trace.png"))
+        plots.generate_claim_report(loaded_res, os.path.join(plots_out, "claim.md"))
+
+        for i in range(1, 6):
+            p = os.path.join(plots_out, f"plot{i}_{['goodput_vs_loss', 'goodput_vs_window', 'reorder_impact', 'rto_comparison', 'rto_trace'][i-1]}.png")
+            assert os.path.exists(p)
+            assert os.path.getsize(p) > 0
+
+        claim_path = os.path.join(plots_out, "claim.md")
+        assert os.path.exists(claim_path)
+        assert os.path.getsize(claim_path) > 0
+        with open(claim_path, "r", encoding="utf-8") as f:
+            claim_text = f.read()
+            assert "Claim Evaluation" in claim_text
 
 
 def main():
