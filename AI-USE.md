@@ -8,6 +8,7 @@ rto.py (the two classes).
 
 ## Atul
 - Used AI for building `test_all.py` test suite code to review and verify whether my code was working properly.
+- Used AI for creating and structuring the `README.md` project documentation and architecture specifications.
 
 ## Shashank
 - Used AI for building `test_all.py` test suite code to review and verify whether my code was working properly.
