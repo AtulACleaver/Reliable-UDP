@@ -237,6 +237,9 @@ def load_completed_keys(csv_path: str) -> set:
 
 def append_result(csv_path: str, row: Dict[str, Any]) -> None:
     """Append a single experiment result row to CSV with durable flush."""
+    d = os.path.dirname(csv_path)
+    if d:
+        os.makedirs(d, exist_ok=True)
     write_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=RESULT_FIELDS)
@@ -254,6 +257,9 @@ def append_traces(traces_path: str, traces: List[Dict[str, Any]]) -> None:
     """Append RTO trace records to trace CSV with durable flush."""
     if not traces:
         return
+    d = os.path.dirname(traces_path)
+    if d:
+        os.makedirs(d, exist_ok=True)
     write_header = not os.path.exists(traces_path) or os.path.getsize(traces_path) == 0
     with open(traces_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=TRACE_FIELDS)
@@ -391,7 +397,7 @@ def run_experiments(
 
 
 def main() -> None:
-    quick = "--quick" in sys.argv
+    quick = any(arg.lower() in ("--quick", "quick", "-q") for arg in sys.argv[1:])
     ret = run_experiments(quick=quick)
     sys.exit(1 if ret > 0 else 0)
 

@@ -93,8 +93,16 @@ def aggregate(rows: List[Dict[str, Any]], group_key_fn, val_key: str) -> Dict[An
     return results
 
 
+def _ensure_parent_dir(path: str) -> None:
+    """Ensure parent directory of output path exists."""
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+
+
 def plot_goodput_vs_loss(rows: List[Dict[str, Any]], out_path: str) -> None:
     """Plot 1: Goodput vs Loss Rate across protocols (sw, gbn, sr)."""
+    _ensure_parent_dir(out_path)
     loss_rows = [r for r in rows if r["sweep"] == "loss"]
     if not loss_rows:
         return
@@ -135,6 +143,7 @@ def plot_goodput_vs_loss(rows: List[Dict[str, Any]], out_path: str) -> None:
 
 def plot_goodput_vs_window(rows: List[Dict[str, Any]], out_path: str) -> None:
     """Plot 2: Goodput vs Window Size for pipelined protocols at 5% loss."""
+    _ensure_parent_dir(out_path)
     win_rows = [r for r in rows if r["sweep"] == "window"]
     if not win_rows:
         return
@@ -174,6 +183,7 @@ def plot_goodput_vs_window(rows: List[Dict[str, Any]], out_path: str) -> None:
 
 def plot_reorder_impact(rows: List[Dict[str, Any]], out_path: str) -> None:
     """Plot 3: Goodput and Retransmissions vs Reordering Rate (W=32)."""
+    _ensure_parent_dir(out_path)
     reorder_rows = [r for r in rows if r["sweep"] == "reorder"]
     if not reorder_rows:
         return
@@ -215,6 +225,7 @@ def plot_reorder_impact(rows: List[Dict[str, Any]], out_path: str) -> None:
 
 def plot_rto_comparison(rows: List[Dict[str, Any]], out_path: str) -> None:
     """Plot 4: RTO Estimation Policy Comparison (Fixed vs Adaptive vs Adaptive-NoKarn)."""
+    _ensure_parent_dir(out_path)
     rto_rows = [r for r in rows if r["sweep"] == "rto"]
     if not rto_rows:
         return
@@ -246,13 +257,28 @@ def plot_rto_comparison(rows: List[Dict[str, Any]], out_path: str) -> None:
 
 def plot_rto_trace(traces: List[Dict[str, Any]], out_path: str) -> None:
     """Plot 5: Adaptive RTO Estimation Trace (RTT vs SRTT vs RTO)."""
+    _ensure_parent_dir(out_path)
     plt.figure(figsize=(9, 5))
 
     if traces:
         seeds = sorted(set(t["seed"] for t in traces))
-        sample_trace = [t for t in traces if t["seed"] == seeds[0] and t["rto"] == "adaptive"]
+        # Select a single continuous run with adaptive RTO to avoid zigzags across multiple runs
+        candidate_traces = [t for t in traces if t.get("seed") == seeds[0] and t.get("rto") == "adaptive"]
+        sr_candidates = [t for t in candidate_traces if t.get("protocol") == "sr"]
+        gbn_candidates = [t for t in candidate_traces if t.get("protocol") == "gbn"]
+        target = sr_candidates or gbn_candidates or candidate_traces or traces
+
+        sample_trace = []
+        last_idx = -1
+        for t in target:
+            idx = int(t.get("sample_idx", 0))
+            if idx <= last_idx and sample_trace:
+                break
+            sample_trace.append(t)
+            last_idx = idx
+
         if not sample_trace:
-            sample_trace = traces[:60]
+            sample_trace = target[:60]
 
         indices = [t["sample_idx"] for t in sample_trace]
         rtts = [t["rtt"] * 1000.0 for t in sample_trace]
@@ -289,7 +315,8 @@ def plot_rto_trace(traces: List[Dict[str, Any]], out_path: str) -> None:
 
 def generate_claim_report(rows: List[Dict[str, Any]], out_path: str) -> None:
     """Analyze results and generate plots/claim.md verifying performance claims."""
-    loss_5_rows = [r for r in rows if abs(r["loss"] - 0.05) < 0.001]
+    _ensure_parent_dir(out_path)
+    loss_5_rows = [r for r in rows if abs(r["loss"] - 0.05) < 0.001 and r.get("rto") == "adaptive"]
 
     sw_rows = [r for r in loss_5_rows if r["protocol"] == "sw" and r["window"] == 1]
     gbn_rows = [r for r in loss_5_rows if r["protocol"] == "gbn" and r["window"] == 32]
@@ -311,21 +338,29 @@ def generate_claim_report(rows: List[Dict[str, Any]], out_path: str) -> None:
         "",
         f"- **Stop-and-Wait (W=1):** {f'{sw_goodput:.2f} KB/s' if sw_goodput else 'Pending full matrix run'}",
         f"- **Go-Back-N (W=32):** {f'{gbn_goodput:.2f} KB/s' if gbn_goodput else 'Pending full matrix run'}",
-        f"- **Selective Repeat (W=32):** {f'{sr_goodput:.2f} KB/s' if sr_goodput else 'Pending Lane 3 integration'}",
+        f"- **Selective Repeat (W=32):** {f'{sr_goodput:.2f} KB/s' if sr_goodput else 'Pending full matrix run'}",
         "",
     ]
 
     if gbn_goodput and sw_goodput:
         pipelined_speedup = gbn_goodput / sw_goodput if sw_goodput > 0 else 0.0
+        lines.append(f"**Pipelining Speedup (GBN vs SW):** `{pipelined_speedup:.2f}x`")
+    if sr_goodput and sw_goodput:
+        sr_speedup = sr_goodput / sw_goodput if sw_goodput > 0 else 0.0
+        lines.append(f"**Selective Repeat Speedup (SR vs SW):** `{sr_speedup:.2f}x`")
+    if sr_goodput and gbn_goodput:
+        sr_vs_gbn = sr_goodput / gbn_goodput if gbn_goodput > 0 else 0.0
+        lines.append(f"**Selective Repeat vs GBN Gain:** `{sr_vs_gbn:.2f}x`")
+
+    if gbn_goodput and sw_goodput:
         lines.extend([
-            f"**Pipelining Speedup (GBN vs SW):** `{pipelined_speedup:.2f}x`",
             "",
             "### Mechanism Analysis:",
             "1. **Stop-and-Wait Serialization Bottleneck:** Stop-and-Wait is constrained to sending exactly one packet per round-trip time (RTT). A lost packet causes the sender to sit idle until the timer expires, severely depressing goodput.",
             "2. **Go-Back-N Pipelining Gain:** Go-Back-N continuously fills the link with up to W=32 outstanding packets, dramatically amortizing round-trip delay. However, upon packet loss, GBN retransmits the entire window [base .. nextseq-1], incurring redundant transfers.",
             "3. **RFC 6298 Adaptive RTO & Karn's Algorithm:** Dynamic RTO tracking adjusts to delay variations. Karn's rule ensures ambiguity from retransmitted packets does not contaminate SRTT estimation.",
             "",
-            f"**Status:** Verified pipelining throughput superiority under stochastic loss.",
+            "**Status:** Verified pipelining throughput superiority under stochastic loss.",
         ])
     else:
         lines.append("Complete runs in `results.csv` to finalize automated speedup calculations.")
@@ -356,7 +391,7 @@ def generate_all(quick: bool = False, output_dir: str = "plots") -> None:
 
 
 def main() -> None:
-    quick = (len(sys.argv) > 1 and sys.argv[1].lower() == "quick")
+    quick = any(arg.lower() in ("quick", "--quick", "-q") for arg in sys.argv[1:])
     generate_all(quick=quick)
 
 
