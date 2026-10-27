@@ -18,6 +18,7 @@ import stopwait
 import gbn
 import channel
 import rto
+import sr
 from channel import Channel, damage
 from rto import FixedRTO, AdaptiveRTO
 
@@ -162,6 +163,66 @@ def run(protocol: str, loss: float = 0.0, data: bytes = b"Reliable UDP Stop-and-
             return stats
         finally:
             gbn.LINGER = orig_linger
+
+    if protocol == "sr":
+        orig_linger = sr.LINGER
+        sr.LINGER = 0.05
+        try:
+            recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            recv_sock.bind(("127.0.0.1", 0))
+            r_addr = recv_sock.getsockname()
+
+            send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            send_sock.bind(("127.0.0.1", 0))
+
+            res = []
+            rt = threading.Thread(target=lambda: res.append(sr.recv_file(recv_sock, 4)))
+            rt.start()
+
+            if loss > 0:
+                proxy_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                proxy_sock.bind(("127.0.0.1", 0))
+                p_addr = proxy_sock.getsockname()
+                dropped = [False]
+
+                def proxy():
+                    client_addr = None
+                    proxy_sock.settimeout(0.5)
+                    while True:
+                        try:
+                            raw, addr = proxy_sock.recvfrom(65535)
+                        except (socket.timeout, TimeoutError):
+                            break
+                        if addr == r_addr:
+                            if client_addr:
+                                proxy_sock.sendto(raw, client_addr)
+                        else:
+                            client_addr = addr
+                            if not dropped[0]:
+                                dropped[0] = True
+                                continue  # Drop first packet to force retransmission
+                            proxy_sock.sendto(raw, r_addr)
+
+                pt = threading.Thread(target=proxy)
+                pt.start()
+
+                stats = sr.send_file(send_sock, p_addr, data, 4, SimpleFixedRTO(0.04))
+                pt.join(timeout=1.0)
+                proxy_sock.close()
+            else:
+                stats = sr.send_file(send_sock, r_addr, data, 4, SimpleFixedRTO(0.04))
+
+            rt.join(timeout=1.0)
+            recv_sock.close()
+            send_sock.close()
+
+            received_data = res[0] if res else b""
+            stats["sha256_ok"] = (
+                hashlib.sha256(received_data).digest() == hashlib.sha256(data).digest()
+            )
+            return stats
+        finally:
+            sr.LINGER = orig_linger
 
     raise NotImplementedError(f"Protocol {protocol} not implemented yet")
 
@@ -819,6 +880,325 @@ def test_gbn_cumulative_ack_slides_multiple():
     assert stats["sent"] == 3
     assert stats["retx"] == 0
     assert stats["timeouts"] == 0
+
+
+# --- Aqifa: sr.py ---
+def test_sr_timer_heap_ordering():
+    """Verify TimerHeap pops earlier deadlines first regardless of insertion order."""
+    class FakeClock:
+        def __init__(self):
+            self.t = 100.0
+
+        def __call__(self):
+            return self.t
+
+    clk = FakeClock()
+    heap = sr.TimerHeap(clock=clk)
+    heap.schedule(seq=2, rto=1.0)  # deadline 101.0
+    heap.schedule(seq=1, rto=0.5)  # deadline 100.5
+    heap.schedule(seq=3, rto=2.0)  # deadline 102.0
+
+    assert heap.next_deadline() == 100.5
+    assert heap.time_to_next_deadline() == 0.5
+
+    clk.t = 100.8
+    expired = heap.pop_expired()
+    assert expired == [1]
+
+    clk.t = 102.5
+    expired = heap.pop_expired()
+    assert expired == [2, 3]
+
+
+def test_sr_timer_heap_cancellation():
+    """Verify cancelling a timer via lazy deletion prevents it from expiring."""
+    class FakeClock:
+        def __init__(self):
+            self.t = 10.0
+
+        def __call__(self):
+            return self.t
+
+    clk = FakeClock()
+    heap = sr.TimerHeap(clock=clk)
+    heap.schedule(seq=10, rto=1.0)
+    heap.schedule(seq=11, rto=2.0)
+
+    # Cancel seq 10 before it expires
+    heap.cancel(10)
+    assert not heap.is_active(10)
+    assert heap.is_active(11)
+    # The next active deadline should skip 10 and return 11's deadline
+    assert heap.next_deadline() == 12.0
+
+    clk.t = 15.0
+    expired = heap.pop_expired()
+    assert expired == [11]
+
+
+def test_sr_timer_heap_reschedule_epoch():
+    """Verify epoch protection: rescheduling ignores stale earlier deadline."""
+    class FakeClock:
+        def __init__(self):
+            self.t = 50.0
+
+        def __call__(self):
+            return self.t
+
+    clk = FakeClock()
+    heap = sr.TimerHeap(clock=clk)
+    # Schedule seq 5 with short rto
+    heap.schedule(seq=5, rto=1.0)  # deadline 51.0 (epoch 1)
+    # Reschedule seq 5 with longer rto
+    clk.t = 50.5
+    heap.schedule(seq=5, rto=2.0)  # deadline 52.5 (epoch 2)
+
+    # Advance clock past old deadline (51.0) but before new deadline (52.5)
+    clk.t = 51.5
+    expired = heap.pop_expired()
+    assert expired == []  # Old epoch must NOT fire
+
+    # Advance clock past new deadline
+    clk.t = 53.0
+    expired = heap.pop_expired()
+    assert expired == [5]
+
+
+def test_sr_timer_heap_pop_multiple():
+    """Verify multiple timers expiring at the same time are all returned."""
+    class FakeClock:
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    clk = FakeClock()
+    heap = sr.TimerHeap(clock=clk)
+    heap.schedule(seq=1, rto=1.0)
+    heap.schedule(seq=2, rto=1.0)
+    heap.schedule(seq=3, rto=1.5)
+
+    clk.t = 1.0
+    expired = heap.pop_expired()
+    assert sorted(expired) == [1, 2]
+    assert heap.next_deadline() == 1.5
+
+
+def test_sr_receiver_buffers_out_of_order_and_flushes():
+    """SR receiver must buffer out-of-order packets inside window and flush when base arrives."""
+    orig_linger = sr.LINGER
+    sr.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_port = recv_sock.getsockname()[1]
+        received = []
+
+        t = threading.Thread(target=lambda: received.append(sr.recv_file(recv_sock, 4)))
+        t.start()
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(0.5)
+
+        # Send packet 1 FIRST (out-of-order! packet 0 not sent yet)
+        client.sendto(packet.make_data(1, b"chunk1", False), ("127.0.0.1", r_port))
+        ack1_raw, _ = client.recvfrom(1024)
+        ack1 = packet.parse_packet(ack1_raw)
+        # In SR, receiver sends ACK 1 immediately, even though packet 0 is missing!
+        assert ack1 is not None and ack1["ack"] == 1
+
+        # Send packet 2 (also out of order)
+        client.sendto(packet.make_data(2, b"chunk2", True), ("127.0.0.1", r_port))
+        ack2_raw, _ = client.recvfrom(1024)
+        ack2 = packet.parse_packet(ack2_raw)
+        assert ack2 is not None and ack2["ack"] == 2
+
+        # Now send missing packet 0! Receiver should deliver 0, 1, 2 in order
+        client.sendto(packet.make_data(0, b"chunk0", False), ("127.0.0.1", r_port))
+        ack0_raw, _ = client.recvfrom(1024)
+        ack0 = packet.parse_packet(ack0_raw)
+        assert ack0 is not None and ack0["ack"] == 0
+
+        t.join(timeout=1.0)
+        recv_sock.close()
+        client.close()
+
+        assert len(received) == 1
+        assert received[0] == b"chunk0chunk1chunk2"
+    finally:
+        sr.LINGER = orig_linger
+
+
+def test_sr_receiver_re_acks_delivered_packets():
+    """SR receiver must re-ACK packets below recv_base to stop sender retransmissions."""
+    orig_linger = sr.LINGER
+    sr.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_port = recv_sock.getsockname()[1]
+        received = []
+
+        t = threading.Thread(target=lambda: received.append(sr.recv_file(recv_sock, 4)))
+        t.start()
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(0.5)
+
+        # Send packet 0 and receive ACK
+        client.sendto(packet.make_data(0, b"first", False), ("127.0.0.1", r_port))
+        ack0_raw, _ = client.recvfrom(1024)
+        ack0 = packet.parse_packet(ack0_raw)
+        assert ack0 is not None and ack0["ack"] == 0
+
+        # Send packet 0 AGAIN (as if client lost ACK 0 and timed out)
+        client.sendto(packet.make_data(0, b"first", False), ("127.0.0.1", r_port))
+        re_ack0_raw, _ = client.recvfrom(1024)
+        re_ack0 = packet.parse_packet(re_ack0_raw)
+        # Receiver MUST re-ACK packet 0 even though base moved to 1
+        assert re_ack0 is not None and re_ack0["ack"] == 0
+
+        # Send packet 1 with FIN
+        client.sendto(packet.make_data(1, b"second", True), ("127.0.0.1", r_port))
+        ack1_raw, _ = client.recvfrom(1024)
+        ack1 = packet.parse_packet(ack1_raw)
+        assert ack1 is not None and ack1["ack"] == 1
+
+        t.join(timeout=1.0)
+        recv_sock.close()
+        client.close()
+
+        # Delivered data must contain packet 0 only once, followed by packet 1
+        assert len(received) == 1
+        assert received[0] == b"firstsecond"
+    finally:
+        sr.LINGER = orig_linger
+
+
+def test_sr_clean():
+    """Verify clean file transfer with Selective Repeat (no loss) and matching SHA-256."""
+    res = run("sr")
+    assert res["retx"] == 0
+    assert res["sha256_ok"] is True
+    assert res["timeouts"] == 0
+
+
+def test_sr_empty_file_transfer():
+    """Verify SR correctly handles empty file transfer (single FIN packet)."""
+    res = run("sr", data=b"")
+    assert res["packets"] == 1
+    assert res["sent"] == 1
+    assert res["retx"] == 0
+    assert res["sha256_ok"] is True
+
+
+def test_sr_sender_stats_fields():
+    """Verify all stats keys are populated accurately in SR sender."""
+    sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender_sock.bind(("127.0.0.1", 0))
+
+    responder_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    responder_sock.bind(("127.0.0.1", 0))
+    resp_addr = responder_sock.getsockname()
+
+    def respond():
+        raw, addr = responder_sock.recvfrom(2048)
+        pkt = packet.parse_packet(raw)
+        if pkt is not None:
+            responder_sock.sendto(packet.make_ack(pkt["seq"]), addr)
+
+    t = threading.Thread(target=respond)
+    t.start()
+
+    rto = SimpleFixedRTO(0.1)
+    stats = sr.send_file(sender_sock, resp_addr, b"testing sr stats", 4, rto)
+    t.join(timeout=1.0)
+    sender_sock.close()
+    responder_sock.close()
+
+    for k in ["packets", "sent", "retx", "timeouts", "dup_acks", "seconds"]:
+        assert k in stats, f"Missing key in stats: {k}"
+    assert stats["packets"] == 1
+    assert stats["sent"] == 1
+    assert stats["retx"] == 0
+
+
+def test_sr_loss():
+    """Verify SR recovers from dropped packets via selective retransmission."""
+    res = run("sr", loss=0.1)
+    assert res["retx"] > 0
+    assert res["sha256_ok"] is True
+
+
+def test_sr_loss_resends_only_lost():
+    """SR sender must retransmit ONLY the dropped packet, not subsequent packets in flight."""
+    orig_linger = sr.LINGER
+    sr.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_addr = recv_sock.getsockname()
+
+        send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        send_sock.bind(("127.0.0.1", 0))
+
+        received = []
+        rt = threading.Thread(target=lambda: received.append(sr.recv_file(recv_sock, 4)))
+        rt.start()
+
+        # Proxy drops packet 1 on its first attempt, but allows packets 0, 2, 3 through
+        proxy_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        proxy_sock.bind(("127.0.0.1", 0))
+        p_addr = proxy_sock.getsockname()
+        dropped_pkt1 = [False]
+        sent_seqs = []
+
+        def proxy():
+            client_addr = None
+            proxy_sock.settimeout(0.6)
+            while True:
+                try:
+                    raw, addr = proxy_sock.recvfrom(65535)
+                except (socket.timeout, TimeoutError):
+                    break
+                if addr == r_addr:
+                    if client_addr:
+                        proxy_sock.sendto(raw, client_addr)
+                else:
+                    client_addr = addr
+                    pkt = packet.parse_packet(raw)
+                    if pkt is not None and (pkt["flags"] & packet.DATA):
+                        sent_seqs.append(pkt["seq"])
+                        if pkt["seq"] == 1 and not dropped_pkt1[0]:
+                            dropped_pkt1[0] = True
+                            continue  # Drop packet 1 once
+                    proxy_sock.sendto(raw, r_addr)
+
+        pt = threading.Thread(target=proxy)
+        pt.start()
+
+        # Send 4 chunks
+        data = b"a" * 1024 + b"b" * 1024 + b"c" * 1024 + b"d" * 500
+        stats = sr.send_file(send_sock, p_addr, data, 4, SimpleFixedRTO(0.08))
+
+        pt.join(timeout=1.0)
+        rt.join(timeout=1.0)
+        proxy_sock.close()
+        recv_sock.close()
+        send_sock.close()
+
+        assert received and received[0] == data
+        assert stats["packets"] == 4
+        # Exactly one packet was retransmitted (packet 1)
+        assert stats["retx"] == 1
+        # Packets 2 and 3 should NOT have been retransmitted!
+        # In sent_seqs: 0, 1 (dropped), 2, 3, then only 1 retransmitted: total count of 2 is 1, total count of 3 is 1
+        assert sent_seqs.count(2) == 1
+        assert sent_seqs.count(3) == 1
+        assert sent_seqs.count(1) == 2
+    finally:
+        sr.LINGER = orig_linger
 
 
 def main():
