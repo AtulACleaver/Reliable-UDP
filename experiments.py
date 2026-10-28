@@ -30,7 +30,6 @@ except ImportError:
 
 
 def configs() -> list[dict]:
-    """Return the 46 experiment settings, without running a transfer."""
     out = []
     for protocol in ("sw", "gbn", "sr"):
         for loss in (0.0, 0.01, 0.02, 0.05, 0.1, 0.2):
@@ -70,11 +69,6 @@ def run_transfer(
     file_size: int = 65536,
     delay: float = 0.002,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """Execute a single end-to-end file transfer through an emulated channel.
-
-    Wires sender -> Channel proxy -> receiver on loopback, validates SHA-256 integrity,
-    and returns transfer statistics dictionary along with any RTO trace records.
-    """
     if protocol == "sw":
         proto = stopwait
     elif protocol == "gbn":
@@ -87,9 +81,8 @@ def run_transfer(
         raise ValueError(f"Unknown protocol {protocol!r}: must be 'sw', 'gbn', or 'sr'")
 
     orig_linger = getattr(proto, "LINGER", 2.0)
-    proto.LINGER = 0.1  # Fast teardown on loopback measurements
+    proto.LINGER = 0.1
 
-    # Deterministic payload based on file size and seed
     data = bytes((i * 31 + seed * 17) % 256 for i in range(file_size))
 
     recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -209,7 +202,6 @@ TRACE_FIELDS = [
 
 
 def load_completed_keys(csv_path: str) -> set:
-    """Read CSV and return set of parameter tuples already verified with sha256_ok True."""
     completed = set()
     if not os.path.exists(csv_path):
         return completed
@@ -236,7 +228,6 @@ def load_completed_keys(csv_path: str) -> set:
 
 
 def append_result(csv_path: str, row: Dict[str, Any]) -> None:
-    """Append a single experiment result row to CSV with durable flush."""
     d = os.path.dirname(csv_path)
     if d:
         os.makedirs(d, exist_ok=True)
@@ -254,7 +245,6 @@ def append_result(csv_path: str, row: Dict[str, Any]) -> None:
 
 
 def append_traces(traces_path: str, traces: List[Dict[str, Any]]) -> None:
-    """Append RTO trace records to trace CSV with durable flush."""
     if not traces:
         return
     d = os.path.dirname(traces_path)
@@ -280,18 +270,6 @@ def run_experiments(
     results_file: str = None,
     traces_file: str = None,
 ) -> int:
-    """Run experiment matrix with resume support and write results to CSV.
-
-    Args:
-        quick: If True, executes one seed on 64 KB writing quick.csv/quick_traces.csv.
-               If False, executes 3 seeds on 1 MB writing results.csv/traces.csv.
-        custom_configs: Optional subset of configuration dictionaries to run.
-        results_file: Custom output path for results CSV.
-        traces_file: Custom output path for traces CSV.
-
-    Returns:
-        int: Number of failed transfers.
-    """
     if quick:
         seeds = [1]
         file_size = 64 * 1024
@@ -404,6 +382,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-

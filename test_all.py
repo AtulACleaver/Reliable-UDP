@@ -1206,7 +1206,6 @@ def test_sr_loss_resends_only_lost():
  
 # --- Harsha: experiments.py & plots.py ---
 def test_experiments_configs_shape_and_types():
-    """Verify configs returns 46 parameter dictionaries with exact required keys and types."""
     rows = experiments.configs()
     assert isinstance(rows, list)
     assert len(rows) == 46
@@ -1221,7 +1220,6 @@ def test_experiments_configs_shape_and_types():
 
 
 def test_experiments_configs_counts():
-    """Verify exact count of configurations allocated to each experiment sweep."""
     rows = experiments.configs()
     counts = {}
     for r in rows:
@@ -1230,7 +1228,6 @@ def test_experiments_configs_counts():
 
 
 def test_experiments_configs_loss_grid():
-    """Verify loss sweep tests sw, gbn, sr across all 6 loss rates with controls."""
     rows = [r for r in experiments.configs() if r["sweep"] == "loss"]
     expected_protocols = {"sw", "gbn", "sr"}
     expected_losses = {0.0, 0.01, 0.02, 0.05, 0.1, 0.2}
@@ -1245,7 +1242,6 @@ def test_experiments_configs_loss_grid():
 
 
 def test_experiments_configs_window_grid():
-    """Verify window sweep tests gbn and sr across 6 window sizes with controls."""
     rows = [r for r in experiments.configs() if r["sweep"] == "window"]
     combos = {(r["protocol"], r["window"]) for r in rows}
     assert len(combos) == 12
@@ -1258,7 +1254,6 @@ def test_experiments_configs_window_grid():
 
 
 def test_experiments_configs_reorder_and_rto_grids():
-    """Verify reorder and RTO parameter sweeps contain expected settings and controls."""
     reorder_rows = [r for r in experiments.configs() if r["sweep"] == "reorder"]
     assert len(reorder_rows) == 10
     reorder_combos = {(r["protocol"], r["reorder"]) for r in reorder_rows}
@@ -1281,7 +1276,6 @@ def test_experiments_configs_reorder_and_rto_grids():
 
 
 def test_experiments_configs_uniqueness_and_stability():
-    """Verify all 46 configuration dicts are unique, non-aliased, and call-stable."""
     rows1 = experiments.configs()
     rows2 = experiments.configs()
     assert rows1 == rows2
@@ -1291,7 +1285,6 @@ def test_experiments_configs_uniqueness_and_stability():
 
 
 def test_experiments_run_transfer_sw_clean():
-    """Verify experiments.run_transfer executes a clean Stop-and-Wait transfer with SHA-256 integrity."""
     stats, _ = experiments.run_transfer("sw", 1, "fixed:0.2", loss=0.0, file_size=4096)
     assert stats["sha256_ok"] is True
     assert stats["retx"] == 0
@@ -1301,7 +1294,6 @@ def test_experiments_run_transfer_sw_clean():
 
 
 def test_experiments_run_transfer_gbn_pipelined():
-    """Verify experiments.run_transfer executes pipelined GBN with AdaptiveRTO across channel."""
     stats, traces = experiments.run_transfer("gbn", 4, "adaptive", loss=0.0, file_size=8192)
     assert stats["sha256_ok"] is True
     assert stats["packets"] > 1
@@ -1311,7 +1303,6 @@ def test_experiments_run_transfer_gbn_pipelined():
 
 
 def test_experiments_run_transfer_sr_pipelined():
-    """Verify experiments.run_transfer executes pipelined SR with AdaptiveRTO across channel."""
     stats, traces = experiments.run_transfer("sr", 4, "adaptive", loss=0.0, file_size=8192)
     assert stats["sha256_ok"] is True
     assert stats["packets"] > 1
@@ -1321,7 +1312,6 @@ def test_experiments_run_transfer_sr_pipelined():
 
 
 def test_experiments_csv_headers_and_fields():
-    """Verify required CSV column fields match contract specification."""
     required = {"sweep", "protocol", "window", "rto", "loss", "reorder", "seed",
                 "file_size", "packets", "sent", "retx", "timeouts", "dup_acks",
                 "seconds", "goodput_bps", "goodput_kbps", "sha256_ok"}
@@ -1329,7 +1319,6 @@ def test_experiments_csv_headers_and_fields():
 
 
 def test_experiments_batch_runner_and_resume():
-    """Verify batch runner writes valid CSV output and resume logic skips verified runs."""
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         res_file = os.path.join(tmpdir, "test_res.csv")
@@ -1355,7 +1344,6 @@ def test_experiments_batch_runner_and_resume():
 
 
 def test_plots_data_loader_and_aggregation():
-    """Verify plots.py handles data loading, aggregation, and standard deviation calculations."""
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_path = os.path.join(tmpdir, "empty.csv")
@@ -1376,7 +1364,6 @@ def test_plots_data_loader_and_aggregation():
 
 
 def test_plots_all_generators_and_claim_report():
-    """Verify plots.py produces all 5 plot images and claim.md report with valid content."""
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         res_file = os.path.join(tmpdir, "results.csv")

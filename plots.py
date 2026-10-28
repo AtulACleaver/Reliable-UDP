@@ -17,7 +17,6 @@ import matplotlib.pyplot as plt
 
 
 def load_results(csv_path: str) -> List[Dict[str, Any]]:
-    """Load and parse verified experiment rows from CSV."""
     rows = []
     if not os.path.exists(csv_path):
         return rows
@@ -52,7 +51,6 @@ def load_results(csv_path: str) -> List[Dict[str, Any]]:
 
 
 def load_traces(traces_path: str) -> List[Dict[str, Any]]:
-    """Load RTO sample traces from CSV."""
     traces = []
     if not os.path.exists(traces_path):
         return traces
@@ -79,7 +77,6 @@ def load_traces(traces_path: str) -> List[Dict[str, Any]]:
 
 
 def aggregate(rows: List[Dict[str, Any]], group_key_fn, val_key: str) -> Dict[Any, Tuple[float, float, int]]:
-    """Compute mean and sample standard deviation grouped by group_key_fn."""
     groups = defaultdict(list)
     for r in rows:
         key = group_key_fn(r)
@@ -94,14 +91,12 @@ def aggregate(rows: List[Dict[str, Any]], group_key_fn, val_key: str) -> Dict[An
 
 
 def _ensure_parent_dir(path: str) -> None:
-    """Ensure parent directory of output path exists."""
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
 
 
 def plot_goodput_vs_loss(rows: List[Dict[str, Any]], out_path: str) -> None:
-    """Plot 1: Goodput vs Loss Rate across protocols (sw, gbn, sr)."""
     _ensure_parent_dir(out_path)
     loss_rows = [r for r in rows if r["sweep"] == "loss"]
     if not loss_rows:
@@ -142,7 +137,6 @@ def plot_goodput_vs_loss(rows: List[Dict[str, Any]], out_path: str) -> None:
 
 
 def plot_goodput_vs_window(rows: List[Dict[str, Any]], out_path: str) -> None:
-    """Plot 2: Goodput vs Window Size for pipelined protocols at 5% loss."""
     _ensure_parent_dir(out_path)
     win_rows = [r for r in rows if r["sweep"] == "window"]
     if not win_rows:
@@ -182,7 +176,6 @@ def plot_goodput_vs_window(rows: List[Dict[str, Any]], out_path: str) -> None:
 
 
 def plot_reorder_impact(rows: List[Dict[str, Any]], out_path: str) -> None:
-    """Plot 3: Goodput and Retransmissions vs Reordering Rate (W=32)."""
     _ensure_parent_dir(out_path)
     reorder_rows = [r for r in rows if r["sweep"] == "reorder"]
     if not reorder_rows:
@@ -224,7 +217,6 @@ def plot_reorder_impact(rows: List[Dict[str, Any]], out_path: str) -> None:
 
 
 def plot_rto_comparison(rows: List[Dict[str, Any]], out_path: str) -> None:
-    """Plot 4: RTO Estimation Policy Comparison (Fixed vs Adaptive vs Adaptive-NoKarn)."""
     _ensure_parent_dir(out_path)
     rto_rows = [r for r in rows if r["sweep"] == "rto"]
     if not rto_rows:
@@ -256,13 +248,11 @@ def plot_rto_comparison(rows: List[Dict[str, Any]], out_path: str) -> None:
 
 
 def plot_rto_trace(traces: List[Dict[str, Any]], out_path: str) -> None:
-    """Plot 5: Adaptive RTO Estimation Trace (RTT vs SRTT vs RTO)."""
     _ensure_parent_dir(out_path)
     plt.figure(figsize=(9, 5))
 
     if traces:
         seeds = sorted(set(t["seed"] for t in traces))
-        # Select a single continuous run with adaptive RTO to avoid zigzags across multiple runs
         candidate_traces = [t for t in traces if t.get("seed") == seeds[0] and t.get("rto") == "adaptive"]
         sr_candidates = [t for t in candidate_traces if t.get("protocol") == "sr"]
         gbn_candidates = [t for t in candidate_traces if t.get("protocol") == "gbn"]
@@ -314,7 +304,6 @@ def plot_rto_trace(traces: List[Dict[str, Any]], out_path: str) -> None:
 
 
 def generate_claim_report(rows: List[Dict[str, Any]], out_path: str) -> None:
-    """Analyze results and generate plots/claim.md verifying performance claims."""
     _ensure_parent_dir(out_path)
     loss_5_rows = [r for r in rows if abs(r["loss"] - 0.05) < 0.001 and r.get("rto") == "adaptive"]
 
@@ -370,7 +359,6 @@ def generate_claim_report(rows: List[Dict[str, Any]], out_path: str) -> None:
 
 
 def generate_all(quick: bool = False, output_dir: str = "plots") -> None:
-    """Generate all five plots and claim verification report."""
     os.makedirs(output_dir, exist_ok=True)
     res_path = "quick.csv" if quick else "results.csv"
     tr_path = "quick_traces.csv" if quick else "traces.csv"
